@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# capture-setup — one-time per-user setup for the capture shortcut
+set -euo pipefail
+
+echo "Setting up capture keyboard shortcut (Ctrl+Shift+Alt+R)..."
+
+# 1. Clear GNOME's built-in screen-recording shortcut that uses the same key
+gsettings set org.gnome.shell.keybindings show-screen-recording-ui "[]"
+
+# 2. Add xbindkeys binding (idempotent)
+XBRC="$HOME/.xbindkeysrc"
+if grep -q '/usr/bin/capture' "$XBRC" 2>/dev/null; then
+  echo "  xbindkeys: already configured"
+else
+  printf '\n# capture tool\n"/usr/bin/capture"\n  Control+Shift+Alt+r\n' >> "$XBRC"
+  echo "  xbindkeys: binding added to $XBRC"
+fi
+
+# 3. Autostart xbindkeys on login
+AUTOSTART="$HOME/.config/autostart/xbindkeys.desktop"
+mkdir -p "$(dirname "$AUTOSTART")"
+cat > "$AUTOSTART" << 'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=xbindkeys
+Exec=/usr/bin/capture-xbindkeys-start
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+DESKTOP
+echo "  autostart: written to $AUTOSTART"
+
+# 4. Start xbindkeys now (single-instance)
+pkill xbindkeys 2>/dev/null || true
+sleep 0.2
+xbindkeys
+echo "  xbindkeys: started"
+
+echo ""
+echo "Done. Press Ctrl+Shift+Alt+R to open the capture menu."

@@ -1,0 +1,178 @@
+#!/usr/bin/python3
+"""Resizable capture-region selector.
+Prints "X Y W H" on confirm, exits silently on cancel.
+Usage: capture-region [screenshot|gif|screen|audio]
+"""
+import gi, sys
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, Gdk, GLib
+
+EDGE     = 22   # px from edge that activates resize drag
+DELAY_MS = 160  # ms to wait after hiding so compositor clears the window
+
+class RegionSelector(Gtk.Window):
+    def __init__(self, mode='screenshot'):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.mode = mode
+
+        self.set_decorated(False)
+        self.set_resizable(True)
+        self.set_default_size(720, 450)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.set_app_paintable(True)
+
+        self.connect('delete-event', lambda *_: Gtk.main_quit())
+        self._build_ui()
+        self._apply_css()
+
+    # ── UI ────────────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        overlay = Gtk.Overlay()
+        self.add(overlay)
+
+        # Drawing area fills the window; handles move/resize mouse events
+        da = Gtk.DrawingArea()
+        da.add_events(Gdk.EventMask.BUTTON_PRESS_MASK |
+                      Gdk.EventMask.POINTER_MOTION_MASK)
+        da.connect('draw', self._on_draw)
+        da.connect('button-press-event', self._on_press)
+        overlay.add(da)
+
+        # Bottom control bar (overlaid, doesn't block clicks on da behind it)
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        bar.set_halign(Gtk.Align.CENTER)
+        bar.set_valign(Gtk.Align.END)
+        bar.set_margin_bottom(14)
+        overlay.add_overlay(bar)
+        overlay.set_overlay_pass_through(bar, False)
+
+        hint = Gtk.Label()
+        hint.set_markup(
+            '<span foreground="#89b4fa" size="small" font_style="italic">'
+            'drag edges / corners to resize  ·  drag center to move'
+            '</span>')
+        bar.pack_start(hint, False, False, 0)
+
+        Gtk.Label(label='    ').show()  # spacer via pack
+        bar.pack_start(Gtk.Label(label='    '), False, False, 0)
+
+        if self.mode in ('gif', 'screen', 'audio'):
+            ok_label = '⏺   Start Recording'
+            if self.mode == 'screen':
+                ok_label = '🎬   Record Screen'
+            elif self.mode == 'audio':
+                ok_label = '🎤   Record + Audio'
+        else:
+            ok_label = '📸   Capture'
+
+        ok_btn = Gtk.Button(label=ok_label)
+        ok_btn.set_size_request(170, 38)
+        ok_btn.connect('clicked', self._confirm)
+        bar.pack_start(ok_btn, False, False, 0)
+
+        cx_btn = Gtk.Button(label='✕   Cancel')
+        cx_btn.set_size_request(100, 38)
+        cx_btn.connect('clicked', lambda *_: Gtk.main_quit())
+        bar.pack_start(cx_btn, False, False, 0)
+
+    def _apply_css(self):
+        css = b"""
+        window { background-color: rgba(0,0,0,0); }
+        button {
+            background:    rgba(30, 30, 46, 0.90);
+            color:         #cdd6f4;
+            border:        1px solid #45475a;
+            border-radius: 8px;
+            padding:       4px 14px;
+        }
+        button:hover { background: rgba(69, 71, 90, 0.96); }
+        """
+        p = Gtk.CssProvider()
+        p.load_from_data(css)
+        Gtk.StyleContext.add_provider_for_screen(
+            self.get_screen(), p, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    # ── drawing ───────────────────────────────────────────────────────────────
+    def _on_draw(self, widget, cr):
+        a = widget.get_allocation()
+        W, H = a.width, a.height
+        lw = 2.5
+
+        # Subtle dark fill
+        cr.set_source_rgba(0.06, 0.06, 0.10, 0.20)
+        cr.rectangle(0, 0, W, H)
+        cr.fill()
+
+        # Dashed blue border
+        cr.set_line_width(lw)
+        cr.set_source_rgba(0.537, 0.706, 0.980, 0.95)
+        cr.set_dash([14, 7])
+        cr.rectangle(lw/2, lw/2, W - lw, H - lw)
+        cr.stroke()
+
+        # Solid corner grab handles
+        cr.set_dash([])
+        cr.set_source_rgba(0.537, 0.706, 0.980, 1.0)
+        sq = 11
+        for cx, cy in [(0, 0), (W, 0), (0, H), (W, H)]:
+            x0 = (cx - sq) if cx > 0 else 0
+            y0 = (cy - sq) if cy > 0 else 0
+            cr.rectangle(x0 + lw/2, y0 + lw/2, sq, sq)
+            cr.fill()
+
+        return False
+
+    # ── interaction ───────────────────────────────────────────────────────────
+    def _on_press(self, widget, event):
+        if event.button != 1:
+            return False
+        a  = self.get_allocation()
+        x, y = event.x, event.y
+        W, H = a.width, a.height
+        rx, ry = int(event.x_root), int(event.y_root)
+
+        left  = x < EDGE
+        right = x > W - EDGE
+        top   = y < EDGE
+        bot   = y > H - EDGE
+
+        if   top  and left:  self.begin_resize_drag(Gdk.WindowEdge.NORTH_WEST, 1, rx, ry, event.time)
+        elif top  and right: self.begin_resize_drag(Gdk.WindowEdge.NORTH_EAST, 1, rx, ry, event.time)
+        elif bot  and left:  self.begin_resize_drag(Gdk.WindowEdge.SOUTH_WEST, 1, rx, ry, event.time)
+        elif bot  and right: self.begin_resize_drag(Gdk.WindowEdge.SOUTH_EAST, 1, rx, ry, event.time)
+        elif left:           self.begin_resize_drag(Gdk.WindowEdge.WEST,       1, rx, ry, event.time)
+        elif right:          self.begin_resize_drag(Gdk.WindowEdge.EAST,       1, rx, ry, event.time)
+        elif top:            self.begin_resize_drag(Gdk.WindowEdge.NORTH,      1, rx, ry, event.time)
+        elif bot:            self.begin_resize_drag(Gdk.WindowEdge.SOUTH,      1, rx, ry, event.time)
+        else:                self.begin_move_drag(1, rx, ry, event.time)
+
+        return True
+
+    def _confirm(self, *_):
+        pos  = self.get_position()
+        size = self.get_size()
+        self.hide()
+        GLib.timeout_add(DELAY_MS, self._emit, pos, size)
+
+    def _emit(self, pos, size):
+        x, y = pos
+        w, h = size
+        w += w % 2   # ensure even dimensions for ffmpeg
+        h += h % 2
+        print(f'{x} {y} {w} {h}', flush=True)
+        Gtk.main_quit()
+        return False
+
+
+if __name__ == '__main__':
+    mode = sys.argv[1] if len(sys.argv) > 1 else 'screenshot'
+    win  = RegionSelector(mode)
+    win.show_all()
+    Gtk.main()

@@ -1,0 +1,16 @@
+Package: simple-screen-capture
+Version: 1.0.0
+Architecture: all
+Maintainer: Kerry Ritter <kerry@example.com>
+Depends: rofi, maim, ffmpeg, xclip, optipng, xbindkeys,
+ python3-gi, gir1.2-gtk-3.0, libnotify-bin, x11-utils
+Recommends: pulseaudio-utils
+Description: Screenshot, GIF and screencast capture with a floating menu
+ Trigger a floating rofi menu via Ctrl+Shift+Alt+R to:
+  - Take area screenshots copied to clipboard as Base64 or binary PNG
+  - Record area GIFs with palette-optimised colour
+  - Record area screencasts as MP4 (with optional audio)
+ .
+ All captures use a persistent resizable region selector so the capture
+ area is visible before recording begins. Run capture-setup after install
+ to wire up the keyboard shortcut.

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Single-instance launcher for xbindkeys (used by autostart)
+PIDFILE="$HOME/.config/xbindkeys.pid"
+if [[ -f "$PIDFILE" ]]; then
+  kill "$(cat "$PIDFILE")" 2>/dev/null || true
+  rm -f "$PIDFILE"
+fi
+pkill xbindkeys 2>/dev/null || true
+sleep 0.2
+xbindkeys --nodaemon &
+echo $! > "$PIDFILE"

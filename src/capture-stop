@@ -1,0 +1,93 @@
+#!/usr/bin/python3
+"""Floating stop-recording button. Blocks until Stop is clicked.
+Usage: capture-stop "Label"
+"""
+import gi, sys
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, Gdk
+
+class StopButton(Gtk.Window):
+    def __init__(self, label):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+
+        self.set_decorated(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_default_size(260, 88)
+
+        # Position at top-right of whichever monitor the cursor is on
+        display = Gdk.Display.get_default()
+        root = Gdk.get_default_root_window()
+        _, cx, cy, _ = root.get_pointer()
+        monitor = display.get_monitor_at_point(cx, cy)
+        geo = monitor.get_geometry()
+        self.move(geo.x + geo.width - 280, geo.y + 20)
+
+        # Transparency
+        visual = self.get_screen().get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.set_app_paintable(True)
+
+        # Swallow delete-event so clicking outside does nothing
+        self.connect('delete-event', lambda *_: True)
+        self.connect('draw', self._draw)
+
+        self._build(label)
+        self._css()
+
+    def _build(self, label):
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add(vbox)
+
+        title = Gtk.Label()
+        title.set_markup(f'<span color="#f38ba8" weight="bold" size="large">🔴  {label}</span>')
+        title.set_margin_top(14)
+        title.set_margin_bottom(8)
+        vbox.pack_start(title, False, False, 0)
+
+        btn = Gtk.Button(label='⏹   Stop Recording')
+        btn.set_margin_start(18)
+        btn.set_margin_end(18)
+        btn.set_margin_bottom(14)
+        btn.connect('clicked', lambda *_: Gtk.main_quit())
+        vbox.pack_start(btn, False, False, 0)
+
+    def _draw(self, widget, cr):
+        a = widget.get_allocation()
+        # Background
+        cr.set_source_rgba(0.118, 0.118, 0.180, 0.96)
+        cr.rectangle(0, 0, a.width, a.height)
+        cr.fill()
+        # Red border
+        cr.set_line_width(2.5)
+        cr.set_source_rgba(0.953, 0.545, 0.659, 1.0)
+        cr.rectangle(1.25, 1.25, a.width - 2.5, a.height - 2.5)
+        cr.stroke()
+        return False
+
+    def _css(self):
+        css = b"""
+        window { background-color: rgba(0,0,0,0); }
+        button {
+            background-color: #3d2030;
+            color:            #f38ba8;
+            border:           1px solid #f38ba8;
+            border-radius:    8px;
+            padding:          7px 14px;
+        }
+        button:hover {
+            background-color: #f38ba8;
+            color:            #1e1e2e;
+        }
+        """
+        p = Gtk.CssProvider()
+        p.load_from_data(css)
+        Gtk.StyleContext.add_provider_for_screen(
+            self.get_screen(), p, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+if __name__ == '__main__':
+    label = ' '.join(sys.argv[1:]) if len(sys.argv) > 1 else 'Recording'
+    win = StopButton(label)
+    win.show_all()
+    Gtk.main()
