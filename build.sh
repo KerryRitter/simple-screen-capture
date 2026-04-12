@@ -12,10 +12,9 @@ mkdir -p "/tmp/$PKG/usr/bin"
 mkdir -p "/tmp/$PKG/usr/share/doc/simple-screen-capture"
 
 # Install scripts
-install -m 755 src/capture                  "/tmp/$PKG/usr/bin/capture"
+install -m 755 src/simple-screen-capture    "/tmp/$PKG/usr/bin/simple-screen-capture"
 install -m 755 src/capture-region           "/tmp/$PKG/usr/bin/capture-region"
 install -m 755 src/capture-stop             "/tmp/$PKG/usr/bin/capture-stop"
-install -m 755 src/capture-setup            "/tmp/$PKG/usr/bin/capture-setup"
 install -m 755 src/capture-xbindkeys-start  "/tmp/$PKG/usr/bin/capture-xbindkeys-start"
 
 # Control file (inject version)

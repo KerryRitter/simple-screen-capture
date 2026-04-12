@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# capture — screenshot · GIF · screencast with floating rofi menu
+# simple-screen-capture — screenshot · GIF · screencast with floating rofi menu
 
 set -uo pipefail
 
@@ -298,13 +298,59 @@ do_record() {
   say "Screencast saved" "${size} — $(basename "$out")" 5000
 }
 
+# ── setup mode ────────────────────────────────────────────────────────────────
+do_setup() {
+  echo "Setting up simple-screen-capture shortcut (Ctrl+Shift+Alt+R)..."
+
+  gsettings set org.gnome.shell.keybindings show-screen-recording-ui "[]"
+  echo "  GNOME screen-recording shortcut cleared"
+
+  local xbrc="$HOME/.xbindkeysrc"
+  if grep -q 'simple-screen-capture' "$xbrc" 2>/dev/null; then
+    echo "  xbindkeys: already configured"
+  else
+    printf '\n# simple-screen-capture\n"/usr/bin/simple-screen-capture"\n  Control+Shift+Alt+r\n' >> "$xbrc"
+    echo "  xbindkeys: binding added to $xbrc"
+  fi
+
+  local autostart="$HOME/.config/autostart/xbindkeys.desktop"
+  mkdir -p "$(dirname "$autostart")"
+  cat > "$autostart" << 'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=xbindkeys
+Exec=/usr/bin/capture-xbindkeys-start
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+DESKTOP
+  echo "  autostart: $autostart"
+
+  pkill xbindkeys 2>/dev/null || true
+  sleep 0.2
+  xbindkeys
+  echo "  xbindkeys: started"
+
+  echo ""
+  echo "Done. Press Ctrl+Shift+Alt+R to open the capture menu."
+}
+
 # ── main ──────────────────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--setup" ]]; then
+  do_setup
+  exit 0
+fi
+
 while true; do
+  sel=$(show_menu) || break
+  [[ -z "$sel" ]] && break
 
   case "$sel" in
+    *Screenshot*) do_screenshot; break ;;
     *Switch*|*Toggle*) toggle_mode ;;
     *GIF*)        do_gif; break ;;
     *Audio*)      do_record "yes"; break ;;
     *Screen*)     do_record "no"; break ;;
+    *)            break ;;
   esac
 done

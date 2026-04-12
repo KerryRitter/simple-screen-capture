@@ -16,10 +16,13 @@ Download the latest `.deb` from [Releases](../../releases/latest), then:
 
 ```bash
 sudo apt install ./simple-screen-capture_*.deb
-capture-setup
+simple-screen-capture --setup
 ```
 
-`capture-setup` is a one-time per-user step that wires up the keyboard shortcut.
+`--setup` is a one-time per-user step that:
+- Clears the conflicting GNOME screen-recording shortcut
+- Binds `Ctrl+Shift+Alt+R` via xbindkeys
+- Configures xbindkeys to start on login
 
 ## Dependencies
 
@@ -32,4 +35,5 @@ Pulled in automatically by apt:
 ```bash
 bash build.sh 1.0.0
 sudo apt install ./simple-screen-capture_1.0.0_all.deb
+simple-screen-capture --setup
 ```
