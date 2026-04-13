@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# simple-screen-capture — screenshot · GIF · screencast with floating rofi menu
+# simple-screen-capture — screenshot · GIF · screencast with GTK capture menu
 
 set -uo pipefail
 
 export DISPLAY="${DISPLAY:-:0}"
 export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
 
-
 CONFIG_DIR="$HOME/.config/capture"
-MODE_FILE="$CONFIG_DIR/clipboard_mode"
 SCREENSHOTS_DIR="$HOME/Pictures/Screenshots"
 SCREENCASTS_DIR="$HOME/Videos/Screencasts"
 
@@ -16,7 +14,7 @@ mkdir -p "$CONFIG_DIR" "$SCREENSHOTS_DIR" "$SCREENCASTS_DIR"
 
 # ── dependency check ──────────────────────────────────────────────────────────
 MISSING=()
-for cmd in rofi maim ffmpeg xclip optipng; do
+for cmd in maim ffmpeg xclip optipng; do
   command -v "$cmd" &>/dev/null || MISSING+=("$cmd")
 done
 if (( ${#MISSING[@]} )); then
@@ -26,168 +24,18 @@ if (( ${#MISSING[@]} )); then
   exit 1
 fi
 
-# ── theme files (written once, cleaned up on exit) ────────────────────────────
-THEME_DIR=$(mktemp -d /tmp/capture-themes-XXXXXX)
-trap 'rm -rf "$THEME_DIR"' EXIT
-
-cat > "$THEME_DIR/base.rasi" << 'RASI'
-configuration {
-  me-select-entry: "";
-  me-accept-entry: "MousePrimary";
-}
-* {
-  background-color: transparent;
-  text-color:       #cdd6f4;
-}
-window {
-  location:         north east;
-  anchor:           north east;
-  x-offset:         -20px;
-  y-offset:          20px;
-  width:            290px;
-  border-radius:    12px;
-  background-color: #1e1e2e;
-  border:           2px;
-  border-color:     #313244;
-  padding:          8px;
-}
-mainbox {
-  spacing:          6px;
-}
-inputbar {
-  background-color: #313244;
-  border-radius:    8px;
-  padding:          10px 14px;
-  children:         [prompt];
-}
-prompt {
-  text-color:       #89b4fa;
-  vertical-align:   0.5;
-}
-listview {
-  lines:            5;
-  scrollbar:        false;
-  spacing:          4px;
-}
-element {
-  border-radius:    8px;
-  padding:          12px 14px;
-}
-element normal {
-  background-color: transparent;
-}
-element selected {
-  background-color: #45475a;
-}
-element-text {
-  vertical-align:   0.5;
-  highlight:        none;
-}
-RASI
-
-cat > "$THEME_DIR/stop.rasi" << 'RASI'
-configuration {
-  me-select-entry: "";
-  me-accept-entry: "MousePrimary";
-}
-* {
-  background-color: transparent;
-  text-color:       #f38ba8;
-}
-window {
-  location:         north east;
-  anchor:           north east;
-  x-offset:         -20px;
-  y-offset:          20px;
-  width:            260px;
-  border-radius:    12px;
-  background-color: #1e1e2e;
-  border:           2px;
-  border-color:     #f38ba8;
-  padding:          8px;
-}
-mainbox {
-  spacing:          6px;
-}
-inputbar {
-  background-color: #3d2030;
-  border-radius:    8px;
-  padding:          10px 14px;
-  children:         [prompt];
-}
-prompt {
-  text-color:       #f38ba8;
-  vertical-align:   0.5;
-}
-listview {
-  lines:            1;
-  scrollbar:        false;
-}
-element {
-  border-radius:    8px;
-  padding:          14px;
-  background-color: #3d2030;
-}
-element selected {
-  background-color: #f38ba8;
-  text-color:       #1e1e2e;
-}
-element-text {
-  vertical-align:   0.5;
-  highlight:        none;
-}
-message {
-  padding:          8px 14px;
-}
-textbox {
-  text-color:       #6c7086;
-}
-RASI
-
-# ── rofi helpers ──────────────────────────────────────────────────────────────
-rofi_pick() { rofi -dmenu -p "$1" -no-fixed-num-lines -theme "$THEME_DIR/base.rasi" 2>/dev/null; }
-rofi_stop() {
-  rofi -dmenu \
-    -p "$1" \
-    -mesg "Press Enter or click ⏹ Stop to finish" \
-    -no-fixed-num-lines \
-    -theme "$THEME_DIR/stop.rasi" \
-    2>/dev/null || true
-}
-
-# ── mode ──────────────────────────────────────────────────────────────────────
-get_mode()    { cat "$MODE_FILE" 2>/dev/null || echo "base64"; }
-toggle_mode() {
-  local m; m=$(get_mode)
-  [[ "$m" == "base64" ]] && echo "binary" > "$MODE_FILE" || echo "base64" > "$MODE_FILE"
-}
-
-# ── menu ──────────────────────────────────────────────────────────────────────
-show_menu() {
-  local mode; mode=$(get_mode)
-  local ml tl
-  [[ "$mode" == "base64" ]] && ml="Base64" && tl="Switch to Binary" \
-                             || ml="Binary" && tl="Switch to Base64"
-  printf '%s\n' \
-    "📸  Screenshot  [${ml}]" \
-    "⇄   ${tl}" \
-    "🎞   Record GIF  (select area)" \
-    "🎬  Record Screen" \
-    "🎤  Record Screen + Audio" \
-  | rofi_pick "Capture"
-}
-
-wait_for_stop() {
-  sleep 0.4  # let the menu-selection click release before opening stop panel
-  /usr/bin/python3 /usr/bin/capture-stop "$1"
-}
-
 # ── notify helper ─────────────────────────────────────────────────────────────
 say() { command -v notify-send &>/dev/null && notify-send "$1" "$2" -t "${3:-3000}" || true; }
 
+# ── stop panel ────────────────────────────────────────────────────────────────
+wait_for_stop() {
+  sleep 0.4  # let the menu-click release before the stop panel appears
+  /usr/bin/python3 /usr/bin/capture-stop "$1"
+}
+
 # ── screenshot ────────────────────────────────────────────────────────────────
 do_screenshot() {
-  local mode; mode=$(get_mode)
+  local clipboard_mode="$1"
   local tmp ts out
   tmp=$(mktemp /tmp/capture-XXXXXX.png)
   ts=$(date +%Y-%m-%d_%H-%M-%S)
@@ -213,7 +61,7 @@ do_screenshot() {
 
   cp "$tmp" "$out"
 
-  if [[ "$mode" == "base64" ]]; then
+  if [[ "$clipboard_mode" == "base64" ]]; then
     base64 -w 0 "$tmp" | xclip -selection clipboard
     say "Screenshot" "Base64 copied — ${comp}B (−${pct}%)"
   else
@@ -347,16 +195,14 @@ if [[ "${1:-}" == "--setup" ]]; then
   exit 0
 fi
 
-while true; do
-  sel=$(show_menu) || break
-  [[ -z "$sel" ]] && break
+result=$(/usr/bin/python3 /usr/bin/capture-menu 2>/dev/null) || true
+[[ -z "$result" ]] && exit 0
 
-  case "$sel" in
-    *Screenshot*) do_screenshot; break ;;
-    *Switch*|*Toggle*) toggle_mode ;;
-    *GIF*)        do_gif; break ;;
-    *Audio*)      do_record "yes"; break ;;
-    *Screen*)     do_record "no"; break ;;
-    *)            break ;;
-  esac
-done
+read -r action clipboard <<< "$result"
+
+case "$action" in
+  screenshot) do_screenshot "$clipboard" ;;
+  gif)        do_gif ;;
+  screen)     do_record "no" ;;
+  audio)      do_record "yes" ;;
+esac

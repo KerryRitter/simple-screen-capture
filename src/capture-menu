@@ -1,0 +1,374 @@
+#!/usr/bin/python3
+"""Floating capture mode selector.
+Prints "<mode> <clipboard_mode>" on confirm, nothing on cancel.
+"""
+import gi, sys, os, math
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, Gdk
+
+CONFIG_DIR = os.path.expanduser('~/.config/capture')
+MODE_FILE  = os.path.join(CONFIG_DIR, 'clipboard_mode')
+
+MODES = [
+    ('screenshot', '📸', 'Screenshot',           '📸  Capture'),
+    ('gif',        '🎞', 'Record GIF',            '⏺  Start Recording'),
+    ('screen',     '🎬', 'Record Screen',         '🎬  Record Screen'),
+    ('audio',      '🎤', 'Record Screen + Audio', '🎤  Record + Audio'),
+]
+
+def get_clipboard_mode():
+    try:
+        return open(MODE_FILE).read().strip()
+    except Exception:
+        return 'base64'
+
+def save_clipboard_mode(mode):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(MODE_FILE, 'w') as f:
+        f.write(mode)
+
+
+class CaptureMenu(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self._selected      = 'screenshot'
+        self._rows          = {}   # mode_id → (eventbox, dot_label, text_label)
+        self._clipboard_mode = get_clipboard_mode()
+
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.set_app_paintable(True)
+
+        self.connect('delete-event',   lambda *_: Gtk.main_quit())
+        self.connect('key-press-event', self._on_key)
+        self.connect('draw',            self._on_draw)
+        self.connect('realize',         self._position)
+
+        self._build_ui()
+        self._apply_css()
+        # Apply initial visual selection after everything is built
+        self._select('screenshot')
+
+    # ── window position ───────────────────────────────────────────────────────
+    def _position(self, *_):
+        display = Gdk.Display.get_default()
+        root    = Gdk.get_default_root_window()
+        _, cx, cy, _ = root.get_pointer()
+        monitor = display.get_monitor_at_point(cx, cy)
+        geo = monitor.get_geometry()
+        w, h = self.get_size()
+        self.move(geo.x + geo.width - w - 20, geo.y + 20)
+
+    # ── background ────────────────────────────────────────────────────────────
+    def _on_draw(self, widget, cr):
+        a = widget.get_allocation()
+        W, H, r = a.width, a.height, 13
+        pi = math.pi
+
+        cr.new_sub_path()
+        cr.arc(r,     r,     r, pi,       1.5*pi)
+        cr.arc(W - r, r,     r, 1.5*pi,   0)
+        cr.arc(W - r, H - r, r, 0,         0.5*pi)
+        cr.arc(r,     H - r, r, 0.5*pi,    pi)
+        cr.close_path()
+
+        # Fill
+        cr.set_source_rgba(0.118, 0.118, 0.180, 0.97)
+        cr.fill_preserve()
+        # Border
+        cr.set_line_width(1.5)
+        cr.set_source_rgba(0.192, 0.196, 0.267, 1.0)
+        cr.stroke()
+        return False
+
+    # ── keyboard ──────────────────────────────────────────────────────────────
+    def _on_key(self, widget, event):
+        if event.keyval == Gdk.KEY_Escape:
+            Gtk.main_quit()
+        elif event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            self._confirm()
+
+    # ── UI construction ───────────────────────────────────────────────────────
+    def _build_ui(self):
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        root.set_size_request(300, -1)
+        self.add(root)
+
+        # Header
+        hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        hdr.set_name('hdr')
+        title = Gtk.Label(label='Capture')
+        title.set_name('hdr-title')
+        hdr.pack_start(title, False, False, 0)
+        root.pack_start(hdr, False, False, 0)
+
+        root.pack_start(self._make_sep(), False, False, 0)
+
+        # Section heading
+        sec = Gtk.Label(label='SELECT MODE', xalign=0)
+        sec.set_name('sec-lbl')
+        root.pack_start(sec, False, False, 0)
+
+        # Mode rows
+        modes_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        modes_box.set_name('modes-box')
+
+        for mode_id, icon, label, _ in MODES:
+            ev, widgets = self._make_mode_row(mode_id, icon, label)
+            self._rows[mode_id] = widgets
+            modes_box.pack_start(ev, False, False, 0)
+            if mode_id == 'screenshot':
+                self._clip_row = self._make_clip_row()
+                modes_box.pack_start(self._clip_row, False, False, 0)
+
+        root.pack_start(modes_box, False, False, 0)
+
+        root.pack_start(self._make_sep(), False, False, 0)
+
+        # Buttons
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_row.set_name('btn-row')
+
+        cancel_btn = Gtk.Button(label='Cancel')
+        cancel_btn.set_name('cancel-btn')
+        cancel_btn.connect('clicked', lambda *_: Gtk.main_quit())
+        btn_row.pack_start(cancel_btn, True, True, 0)
+
+        self._capture_btn = Gtk.Button(label='📸  Capture')
+        self._capture_btn.set_name('capture-btn')
+        self._capture_btn.connect('clicked', lambda *_: self._confirm())
+        btn_row.pack_start(self._capture_btn, True, True, 0)
+
+        root.pack_start(btn_row, False, False, 0)
+
+    def _make_sep(self):
+        sep = Gtk.Box()
+        sep.set_name('sep')
+        sep.set_size_request(-1, 1)
+        return sep
+
+    def _make_mode_row(self, mode_id, icon, label):
+        ev = Gtk.EventBox()
+        ev.set_name('mode-row')
+        ev.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK |
+            Gdk.EventMask.ENTER_NOTIFY_MASK |
+            Gdk.EventMask.LEAVE_NOTIFY_MASK
+        )
+
+        inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        inner.set_margin_start(14)
+        inner.set_margin_end(14)
+        inner.set_margin_top(10)
+        inner.set_margin_bottom(10)
+
+        dot = Gtk.Label(label='○')
+        dot.set_name('dot')
+        dot.set_width_chars(1)
+
+        icon_lbl = Gtk.Label(label=icon)
+        icon_lbl.set_name('mode-icon')
+
+        text_lbl = Gtk.Label(label=label, xalign=0)
+        text_lbl.set_name('mode-text')
+
+        inner.pack_start(dot,      False, False, 0)
+        inner.pack_start(icon_lbl, False, False, 0)
+        inner.pack_start(text_lbl, True,  True,  0)
+        ev.add(inner)
+
+        ev.connect('button-press-event',  lambda w, e: self._select(mode_id))
+        ev.connect('enter-notify-event',  lambda w, e: self._row_hover(mode_id, True))
+        ev.connect('leave-notify-event',  lambda w, e: self._row_hover(mode_id, False))
+
+        return ev, (ev, dot, text_lbl)
+
+    def _make_clip_row(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_name('clip-row')
+        box.set_margin_start(44)
+        box.set_margin_end(14)
+        box.set_margin_bottom(8)
+
+        lbl = Gtk.Label(label='Clipboard:', xalign=0)
+        lbl.set_name('clip-lbl')
+        box.pack_start(lbl, False, False, 0)
+
+        self._btn_b64 = Gtk.Button(label='Base64')
+        self._btn_b64.connect('clicked', lambda *_: self._set_clip('base64'))
+
+        self._btn_bin = Gtk.Button(label='Binary PNG')
+        self._btn_bin.connect('clicked', lambda *_: self._set_clip('binary'))
+
+        box.pack_end(self._btn_bin, False, False, 0)
+        box.pack_end(self._btn_b64, False, False, 0)
+
+        self._refresh_clip_buttons()
+        return box
+
+    # ── interaction ───────────────────────────────────────────────────────────
+    def _select(self, mode_id):
+        self._selected = mode_id
+
+        for mid, (ev, dot, text) in self._rows.items():
+            if mid == mode_id:
+                dot.set_markup('<span color="#89b4fa">●</span>')
+                text.set_name('mode-text-active')
+                ev.set_name('mode-row-active')
+            else:
+                dot.set_markup('<span color="#585b70">○</span>')
+                text.set_name('mode-text')
+                ev.set_name('mode-row')
+
+        # Show clipboard toggle only for screenshot
+        self._clip_row.set_visible(mode_id == 'screenshot')
+
+        # Update action button label
+        btn_label = next(bl for mid, _, _, bl in MODES if mid == mode_id)
+        self._capture_btn.set_label(btn_label)
+
+    def _row_hover(self, mode_id, entering):
+        ev, dot, text = self._rows[mode_id]
+        if mode_id == self._selected:
+            return
+        ev.set_name('mode-row-hover' if entering else 'mode-row')
+
+    def _set_clip(self, mode):
+        self._clipboard_mode = mode
+        self._refresh_clip_buttons()
+
+    def _refresh_clip_buttons(self):
+        if self._clipboard_mode == 'base64':
+            self._btn_b64.set_name('fmt-active')
+            self._btn_bin.set_name('fmt-btn')
+        else:
+            self._btn_b64.set_name('fmt-btn')
+            self._btn_bin.set_name('fmt-active')
+
+    def _confirm(self):
+        if self._selected == 'screenshot':
+            save_clipboard_mode(self._clipboard_mode)
+        print(f'{self._selected} {self._clipboard_mode}', flush=True)
+        Gtk.main_quit()
+
+    # ── CSS ───────────────────────────────────────────────────────────────────
+    def _apply_css(self):
+        css = b"""
+        window { background-color: transparent; }
+
+        /* All boxes transparent so Cairo bg shows */
+        box { background-color: transparent; }
+
+        #hdr {
+            padding: 16px 18px 14px 18px;
+        }
+        #hdr-title {
+            color:       #cdd6f4;
+            font-size:   15px;
+            font-weight: bold;
+        }
+        #sec-lbl {
+            color:          #585b70;
+            font-size:      10px;
+            padding:        8px 18px 4px 18px;
+        }
+        #sep {
+            background-color: #313244;
+        }
+        #modes-box {
+            padding: 6px 10px;
+        }
+
+        /* Mode rows */
+        #mode-row, #mode-row-hover, #mode-row-active {
+            border-radius: 8px;
+        }
+        #mode-row-hover  { background-color: rgba(69, 71, 90, 0.50); }
+        #mode-row-active { background-color: rgba(137, 180, 250, 0.10); }
+
+        #mode-icon { font-size: 14px; }
+
+        #mode-text {
+            color:     #cdd6f4;
+            font-size: 13px;
+        }
+        #mode-text-active {
+            color:       #89b4fa;
+            font-size:   13px;
+            font-weight: bold;
+        }
+
+        /* Clipboard format row */
+        #clip-row  { background-color: transparent; }
+        #clip-lbl  { color: #585b70; font-size: 11px; }
+
+        #fmt-btn {
+            background-color: transparent;
+            color:            #585b70;
+            border:           1px solid #45475a;
+            border-radius:    5px;
+            padding:          2px 8px;
+            font-size:        11px;
+            min-height:       0;
+        }
+        #fmt-btn:hover {
+            background-color: #313244;
+            color:            #a6adc8;
+        }
+        #fmt-active {
+            background-color: rgba(137, 180, 250, 0.15);
+            color:            #89b4fa;
+            border:           1px solid #89b4fa;
+            border-radius:    5px;
+            padding:          2px 8px;
+            font-size:        11px;
+            min-height:       0;
+        }
+
+        /* Buttons */
+        #btn-row {
+            padding: 12px 16px 16px 16px;
+        }
+        #cancel-btn {
+            background-color: transparent;
+            color:            #585b70;
+            border:           1px solid #45475a;
+            border-radius:    8px;
+            padding:          9px 16px;
+            font-size:        13px;
+        }
+        #cancel-btn:hover {
+            background-color: #313244;
+            color:            #cdd6f4;
+        }
+        #capture-btn {
+            background-color: #89b4fa;
+            color:            #1e1e2e;
+            border:           none;
+            border-radius:    8px;
+            padding:          9px 16px;
+            font-size:        13px;
+            font-weight:      bold;
+        }
+        #capture-btn:hover {
+            background-color: #b4d0fb;
+        }
+        """
+        p = Gtk.CssProvider()
+        p.load_from_data(css)
+        Gtk.StyleContext.add_provider_for_screen(
+            self.get_screen(), p, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+
+if __name__ == '__main__':
+    win = CaptureMenu()
+    win.show_all()
+    Gtk.main()
