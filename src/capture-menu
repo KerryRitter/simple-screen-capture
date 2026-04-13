@@ -1,13 +1,17 @@
 #!/usr/bin/python3
 """Floating capture mode selector.
-Prints "<mode> <clipboard_mode>" on confirm, nothing on cancel.
+Prints "<mode> <clipboard_mode> <smart_slice> <threshold>" on confirm.
 """
 import gi, sys, os, math
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk
 
-CONFIG_DIR = os.path.expanduser('~/.config/capture')
-MODE_FILE  = os.path.join(CONFIG_DIR, 'clipboard_mode')
+CONFIG_DIR        = os.path.expanduser('~/.config/capture')
+MODE_FILE         = os.path.join(CONFIG_DIR, 'clipboard_mode')
+SMART_SLICE_FILE  = os.path.join(CONFIG_DIR, 'smart_slice')
+THRESHOLD_FILE    = os.path.join(CONFIG_DIR, 'smart_slice_threshold')
+
+DEFAULT_THRESHOLD = 0.07
 
 MODES = [
     ('screenshot', '📸', 'Screenshot',           '📸  Capture'),
@@ -27,12 +31,35 @@ def save_clipboard_mode(mode):
     with open(MODE_FILE, 'w') as f:
         f.write(mode)
 
+def get_smart_slice():
+    try:
+        return open(SMART_SLICE_FILE).read().strip() == '1'
+    except Exception:
+        return False
+
+def save_smart_slice(enabled):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(SMART_SLICE_FILE, 'w') as f:
+        f.write('1' if enabled else '0')
+
+def get_threshold():
+    try:
+        v = float(open(THRESHOLD_FILE).read().strip())
+        return max(0.02, min(0.25, v))
+    except Exception:
+        return DEFAULT_THRESHOLD
+
+def save_threshold(value):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(THRESHOLD_FILE, 'w') as f:
+        f.write(f'{value:.3f}')
+
 
 class CaptureMenu(Gtk.Window):
     def __init__(self):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
-        self._selected      = 'screenshot'
-        self._rows          = {}   # mode_id → (eventbox, dot_label, text_label)
+        self._selected       = 'screenshot'
+        self._rows           = {}
         self._clipboard_mode = get_clipboard_mode()
 
         self.set_decorated(False)
@@ -47,17 +74,16 @@ class CaptureMenu(Gtk.Window):
             self.set_visual(visual)
         self.set_app_paintable(True)
 
-        self.connect('delete-event',   lambda *_: Gtk.main_quit())
+        self.connect('delete-event',    lambda *_: Gtk.main_quit())
         self.connect('key-press-event', self._on_key)
         self.connect('draw',            self._on_draw)
         self.connect('realize',         self._position)
 
         self._build_ui()
         self._apply_css()
-        # Apply initial visual selection after everything is built
         self._select('screenshot')
 
-    # ── window position ───────────────────────────────────────────────────────
+    # ── position ──────────────────────────────────────────────────────────────
     def _position(self, *_):
         display = Gdk.Display.get_default()
         root    = Gdk.get_default_root_window()
@@ -74,16 +100,14 @@ class CaptureMenu(Gtk.Window):
         pi = math.pi
 
         cr.new_sub_path()
-        cr.arc(r,     r,     r, pi,       1.5*pi)
-        cr.arc(W - r, r,     r, 1.5*pi,   0)
-        cr.arc(W - r, H - r, r, 0,         0.5*pi)
-        cr.arc(r,     H - r, r, 0.5*pi,    pi)
+        cr.arc(r,     r,     r, pi,      1.5*pi)
+        cr.arc(W - r, r,     r, 1.5*pi,  0)
+        cr.arc(W - r, H - r, r, 0,        0.5*pi)
+        cr.arc(r,     H - r, r, 0.5*pi,   pi)
         cr.close_path()
 
-        # Fill
         cr.set_source_rgba(0.118, 0.118, 0.180, 0.97)
         cr.fill_preserve()
-        # Border
         cr.set_line_width(1.5)
         cr.set_source_rgba(0.192, 0.196, 0.267, 1.0)
         cr.stroke()
@@ -99,7 +123,7 @@ class CaptureMenu(Gtk.Window):
     # ── UI construction ───────────────────────────────────────────────────────
     def _build_ui(self):
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        root.set_size_request(300, -1)
+        root.set_size_request(310, -1)
         self.add(root)
 
         # Header
@@ -130,6 +154,10 @@ class CaptureMenu(Gtk.Window):
                 modes_box.pack_start(self._clip_row, False, False, 0)
 
         root.pack_start(modes_box, False, False, 0)
+
+        # Smart Slice + threshold
+        root.pack_start(self._make_sep(), False, False, 0)
+        root.pack_start(self._make_smart_slice_section(), False, False, 0)
 
         root.pack_start(self._make_sep(), False, False, 0)
 
@@ -185,9 +213,9 @@ class CaptureMenu(Gtk.Window):
         inner.pack_start(text_lbl, True,  True,  0)
         ev.add(inner)
 
-        ev.connect('button-press-event',  lambda w, e: self._select(mode_id))
-        ev.connect('enter-notify-event',  lambda w, e: self._row_hover(mode_id, True))
-        ev.connect('leave-notify-event',  lambda w, e: self._row_hover(mode_id, False))
+        ev.connect('button-press-event', lambda w, e: self._select(mode_id))
+        ev.connect('enter-notify-event', lambda w, e: self._row_hover(mode_id, True))
+        ev.connect('leave-notify-event', lambda w, e: self._row_hover(mode_id, False))
 
         return ev, (ev, dot, text_lbl)
 
@@ -214,6 +242,68 @@ class CaptureMenu(Gtk.Window):
         self._refresh_clip_buttons()
         return box
 
+    def _make_smart_slice_section(self):
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        outer.set_name('slice-section')
+
+        # Checkbox row
+        cb_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        cb_row.set_name('slice-cb-row')
+
+        self._slice_cb = Gtk.CheckButton(label='Smart Slice')
+        self._slice_cb.set_name('slice-cb')
+        self._slice_cb.set_active(get_smart_slice())
+        self._slice_cb.connect('toggled', lambda *_: self._update_threshold_vis())
+        cb_row.pack_start(self._slice_cb, False, False, 0)
+        outer.pack_start(cb_row, False, False, 0)
+
+        # Description
+        self._slice_sub = Gtk.Label(
+            label='Extract key screenshots from the recording',
+            xalign=0)
+        self._slice_sub.set_name('slice-sub')
+        outer.pack_start(self._slice_sub, False, False, 0)
+
+        # Threshold row
+        self._threshold_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self._threshold_row.set_name('threshold-row')
+
+        # Header: label + current value
+        thresh_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        thresh_lbl = Gtk.Label(label='Sensitivity', xalign=0)
+        thresh_lbl.set_name('thresh-lbl')
+        self._thresh_val = Gtk.Label(xalign=1)
+        self._thresh_val.set_name('thresh-val')
+        thresh_hdr.pack_start(thresh_lbl,        True,  True,  0)
+        thresh_hdr.pack_start(self._thresh_val,  False, False, 0)
+        self._threshold_row.pack_start(thresh_hdr, False, False, 0)
+
+        # Slider
+        self._scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.02, 0.25, 0.01)
+        self._scale.set_name('thresh-scale')
+        self._scale.set_value(get_threshold())
+        self._scale.set_draw_value(False)
+        self._scale.set_hexpand(True)
+        self._scale.connect('value-changed', self._on_threshold_change)
+        self._threshold_row.pack_start(self._scale, False, False, 0)
+
+        # End labels
+        ends = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        lbl_more = Gtk.Label(label='More slices', xalign=0)
+        lbl_more.set_name('thresh-end')
+        lbl_fewer = Gtk.Label(label='Fewer', xalign=1)
+        lbl_fewer.set_name('thresh-end')
+        ends.pack_start(lbl_more,  True,  True,  0)
+        ends.pack_start(lbl_fewer, False, False, 0)
+        self._threshold_row.pack_start(ends, False, False, 0)
+
+        outer.pack_start(self._threshold_row, False, False, 0)
+
+        # Sync initial value label
+        self._on_threshold_change(self._scale)
+
+        return outer
+
     # ── interaction ───────────────────────────────────────────────────────────
     def _select(self, mode_id):
         self._selected = mode_id
@@ -228,12 +318,19 @@ class CaptureMenu(Gtk.Window):
                 text.set_name('mode-text')
                 ev.set_name('mode-row')
 
-        # Show clipboard toggle only for screenshot
         self._clip_row.set_visible(mode_id == 'screenshot')
 
-        # Update action button label
+        is_recording = mode_id != 'screenshot'
+        self._slice_cb.set_sensitive(is_recording)
+        self._slice_sub.set_sensitive(is_recording)
+        self._update_threshold_vis()
+
         btn_label = next(bl for mid, _, _, bl in MODES if mid == mode_id)
         self._capture_btn.set_label(btn_label)
+
+    def _update_threshold_vis(self):
+        visible = (self._selected != 'screenshot' and self._slice_cb.get_active())
+        self._threshold_row.set_visible(visible)
 
     def _row_hover(self, mode_id, entering):
         ev, dot, text = self._rows[mode_id]
@@ -253,62 +350,49 @@ class CaptureMenu(Gtk.Window):
             self._btn_b64.set_name('fmt-btn')
             self._btn_bin.set_name('fmt-active')
 
+    def _on_threshold_change(self, scale):
+        v = scale.get_value()
+        self._thresh_val.set_text(f'{v:.2f}')
+
     def _confirm(self):
         if self._selected == 'screenshot':
             save_clipboard_mode(self._clipboard_mode)
-        print(f'{self._selected} {self._clipboard_mode}', flush=True)
+        smart = self._slice_cb.get_active() and self._selected != 'screenshot'
+        threshold = self._scale.get_value()
+        save_smart_slice(self._slice_cb.get_active())
+        save_threshold(threshold)
+        print(f'{self._selected} {self._clipboard_mode} {"1" if smart else "0"} {threshold:.3f}',
+              flush=True)
         Gtk.main_quit()
 
     # ── CSS ───────────────────────────────────────────────────────────────────
     def _apply_css(self):
         css = b"""
         window { background-color: transparent; }
+        box    { background-color: transparent; }
 
-        /* All boxes transparent so Cairo bg shows */
-        box { background-color: transparent; }
+        #hdr       { padding: 16px 18px 14px 18px; }
+        #hdr-title { color: #cdd6f4; font-size: 15px; font-weight: bold; }
 
-        #hdr {
-            padding: 16px 18px 14px 18px;
-        }
-        #hdr-title {
-            color:       #cdd6f4;
-            font-size:   15px;
-            font-weight: bold;
-        }
         #sec-lbl {
-            color:          #585b70;
-            font-size:      10px;
-            padding:        8px 18px 4px 18px;
+            color:     #585b70;
+            font-size: 10px;
+            padding:   8px 18px 4px 18px;
         }
-        #sep {
-            background-color: #313244;
-        }
-        #modes-box {
-            padding: 6px 10px;
-        }
+        #sep { background-color: #313244; }
 
-        /* Mode rows */
-        #mode-row, #mode-row-hover, #mode-row-active {
-            border-radius: 8px;
-        }
+        #modes-box { padding: 6px 10px; }
+
+        #mode-row, #mode-row-hover, #mode-row-active { border-radius: 8px; }
         #mode-row-hover  { background-color: rgba(69, 71, 90, 0.50); }
         #mode-row-active { background-color: rgba(137, 180, 250, 0.10); }
 
         #mode-icon { font-size: 14px; }
+        #mode-text        { color: #cdd6f4; font-size: 13px; }
+        #mode-text-active { color: #89b4fa; font-size: 13px; font-weight: bold; }
 
-        #mode-text {
-            color:     #cdd6f4;
-            font-size: 13px;
-        }
-        #mode-text-active {
-            color:       #89b4fa;
-            font-size:   13px;
-            font-weight: bold;
-        }
-
-        /* Clipboard format row */
-        #clip-row  { background-color: transparent; }
-        #clip-lbl  { color: #585b70; font-size: 11px; }
+        #clip-row { background-color: transparent; }
+        #clip-lbl { color: #585b70; font-size: 11px; }
 
         #fmt-btn {
             background-color: transparent;
@@ -319,10 +403,7 @@ class CaptureMenu(Gtk.Window):
             font-size:        11px;
             min-height:       0;
         }
-        #fmt-btn:hover {
-            background-color: #313244;
-            color:            #a6adc8;
-        }
+        #fmt-btn:hover { background-color: #313244; color: #a6adc8; }
         #fmt-active {
             background-color: rgba(137, 180, 250, 0.15);
             color:            #89b4fa;
@@ -333,10 +414,70 @@ class CaptureMenu(Gtk.Window):
             min-height:       0;
         }
 
-        /* Buttons */
-        #btn-row {
-            padding: 12px 16px 16px 16px;
+        /* Smart Slice */
+        #slice-section  { padding: 10px 14px 10px 14px; }
+        #slice-cb-row   { background-color: transparent; }
+
+        checkbutton#slice-cb              { color: #cdd6f4; font-size: 13px; }
+        checkbutton#slice-cb:disabled     { color: #45475a; }
+        checkbutton#slice-cb check {
+            background-color: #313244;
+            border-color:     #45475a;
+            border-radius:    4px;
+            min-width:        14px;
+            min-height:       14px;
         }
+        checkbutton#slice-cb:checked check {
+            background-color: #89b4fa;
+            border-color:     #89b4fa;
+            color:            #1e1e2e;
+        }
+        checkbutton#slice-cb:disabled check {
+            background-color: #1e1e2e;
+            border-color:     #313244;
+        }
+        #slice-sub {
+            color:       #585b70;
+            font-size:   11px;
+            font-style:  italic;
+            margin-left: 24px;
+        }
+        #slice-sub:disabled { color: #313244; }
+
+        /* Threshold */
+        #threshold-row {
+            margin-top:  8px;
+            margin-left: 24px;
+        }
+        #thresh-lbl { color: #a6adc8; font-size: 11px; }
+        #thresh-val { color: #89b4fa; font-size: 11px; font-weight: bold; }
+        #thresh-end { color: #45475a; font-size: 10px; }
+
+        scale#thresh-scale {
+            padding: 0;
+        }
+        scale#thresh-scale trough {
+            background-color: #313244;
+            border-radius:    3px;
+            min-height:       4px;
+        }
+        scale#thresh-scale trough highlight {
+            background-color: #89b4fa;
+            border-radius:    3px;
+        }
+        scale#thresh-scale slider {
+            background-color: #89b4fa;
+            border:           none;
+            border-radius:    50%;
+            min-width:        14px;
+            min-height:       14px;
+            box-shadow:       none;
+        }
+        scale#thresh-scale slider:hover { background-color: #b4d0fb; }
+
+        /* Buttons */
+        #btn-row { padding: 12px 16px 16px 16px; }
+
         #cancel-btn {
             background-color: transparent;
             color:            #585b70;
@@ -345,11 +486,16 @@ class CaptureMenu(Gtk.Window):
             padding:          9px 16px;
             font-size:        13px;
         }
-        #cancel-btn:hover {
-            background-color: #313244;
-            color:            #cdd6f4;
-        }
-        #capture-btn {
+        #cancel-btn:hover { background-color: #313244; color: #cdd6f4; }
+
+        #capture-btn,
+        #capture-btn:link,
+        #capture-btn:visited,
+        #capture-btn:focus,
+        #capture-btn:active,
+        #capture-btn:checked,
+        #capture-btn:backdrop {
+            background-image: none;
             background-color: #89b4fa;
             color:            #1e1e2e;
             border:           none;
@@ -357,9 +503,12 @@ class CaptureMenu(Gtk.Window):
             padding:          9px 16px;
             font-size:        13px;
             font-weight:      bold;
+            box-shadow:       none;
+            text-shadow:      none;
         }
         #capture-btn:hover {
-            background-color: #b4d0fb;
+            background-color: #a6c8fc;
+            background-image: none;
         }
         """
         p = Gtk.CssProvider()

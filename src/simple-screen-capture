@@ -9,6 +9,7 @@ export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
 CONFIG_DIR="$HOME/.config/capture"
 SCREENSHOTS_DIR="$HOME/Pictures/Screenshots"
 SCREENCASTS_DIR="$HOME/Videos/Screencasts"
+SLICES_DIR="$SCREENSHOTS_DIR/slices"
 
 mkdir -p "$CONFIG_DIR" "$SCREENSHOTS_DIR" "$SCREENCASTS_DIR"
 
@@ -29,8 +30,40 @@ say() { command -v notify-send &>/dev/null && notify-send "$1" "$2" -t "${3:-300
 
 # ── stop panel ────────────────────────────────────────────────────────────────
 wait_for_stop() {
-  sleep 0.4  # let the menu-click release before the stop panel appears
+  sleep 0.4
   /usr/bin/python3 /usr/bin/capture-stop "$1"
+}
+
+# ── smart slice ───────────────────────────────────────────────────────────────
+do_smart_slice() {
+  local video="$1"
+  local ts="$2"
+  local threshold="${3:-0.07}"
+  local outdir="$SLICES_DIR/$ts"
+  mkdir -p "$outdir"
+
+  say "Smart Slice" "Analysing recording…" 20000
+
+  # 0.07 threshold suits UI/terminal recordings (movie scene cuts need ~0.25+).
+  # The gte(t-prev_selected_t,0.5) guard prevents frame bursts during rapid
+  # output — at most one slice every 0.5 s even if every frame is "different".
+  ffmpeg -i "$video" \
+    -vf "select='eq(n\,0)+gt(scene\,${threshold})*gte(t-prev_selected_t\,0.5)',setpts=N/TB" \
+    -vsync vfr \
+    -q:v 2 \
+    "$outdir/slice_%04d.png" \
+    -loglevel quiet 2>/dev/null
+
+  local count
+  count=$(find "$outdir" -name 'slice_*.png' 2>/dev/null | wc -l)
+
+  if (( count == 0 )); then
+    # Fallback: just grab first frame if nothing was detected
+    ffmpeg -i "$video" -frames:v 1 "$outdir/slice_0001.png" -loglevel quiet 2>/dev/null || true
+    count=1
+  fi
+
+  say "Smart Slice" "${count} screenshot$([ "$count" -ne 1 ] && echo s) saved → slices/${ts}" 8000
 }
 
 # ── screenshot ────────────────────────────────────────────────────────────────
@@ -72,12 +105,13 @@ do_screenshot() {
 
 # ── gif ───────────────────────────────────────────────────────────────────────
 do_gif() {
+  local smart_slice="$1"
+  local threshold="$2"
   local tmp palette ts out
   tmp=$(mktemp /tmp/capture-XXXXXX.mp4)
   palette=$(mktemp /tmp/capture-XXXXXX.png)
   ts=$(date +%Y-%m-%d_%H-%M-%S)
   out="$SCREENCASTS_DIR/${ts}.gif"
-  trap 'rm -f "$tmp" "$palette"' RETURN
 
   local rfile; rfile=$(mktemp /tmp/capture-region-XXXXXX)
   trap 'rm -f "$rfile"' RETURN
@@ -106,6 +140,11 @@ do_gif() {
     -filter_complex "fps=15,scale=${W}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" \
     "$out" -y -loglevel quiet
 
+  # Smart slice runs before temp file cleanup
+  [[ "$smart_slice" == "1" ]] && do_smart_slice "$tmp" "$ts" "$threshold"
+
+  rm -f "$tmp" "$palette"
+
   local size; size=$(du -h "$out" | cut -f1)
   say "GIF saved" "${size} — $(basename "$out")" 5000
 }
@@ -113,6 +152,8 @@ do_gif() {
 # ── screencast ────────────────────────────────────────────────────────────────
 do_record() {
   local audio="$1"
+  local smart_slice="$2"
+  local threshold="$3"
   local ts out
   ts=$(date +%Y-%m-%d_%H-%M-%S)
   out="$SCREENCASTS_DIR/${ts}.mp4"
@@ -150,6 +191,8 @@ do_record() {
 
   local size; size=$(du -h "$out" | cut -f1)
   say "Screencast saved" "${size} — $(basename "$out")" 5000
+
+  [[ "$smart_slice" == "1" ]] && do_smart_slice "$out" "$ts" "$threshold"
 }
 
 # ── setup mode ────────────────────────────────────────────────────────────────
@@ -160,12 +203,41 @@ do_setup() {
   echo "  GNOME screen-recording shortcut cleared"
 
   local xbrc="$HOME/.xbindkeysrc"
-  if grep -q 'simple-screen-capture' "$xbrc" 2>/dev/null; then
-    echo "  xbindkeys: already configured"
-  else
-    printf '\n# simple-screen-capture\n"/usr/bin/simple-screen-capture"\n  Control+Shift+Alt+r\n' >> "$xbrc"
-    echo "  xbindkeys: binding added to $xbrc"
+
+  # Remove any existing binding for this key (old 'capture' entry, duplicates, etc.)
+  # A binding block is: one command line + one key line. We delete the command line
+  # immediately preceding any line that mentions Control+Shift+Alt+r.
+  if grep -qi 'Control+Shift+Alt+r' "$xbrc" 2>/dev/null; then
+    # Use a temp file: drop every line N-1 where line N matches the key
+    python3 - "$xbrc" <<'PY'
+import sys, re
+path = sys.argv[1]
+lines = open(path).readlines()
+key_pat = re.compile(r'Control\+Shift\+Alt\+r', re.IGNORECASE)
+drop = set()
+for i, ln in enumerate(lines):
+    if key_pat.search(ln):
+        drop.add(i)          # the key line itself
+        # walk back to find the command line (skip blank/comment lines)
+        j = i - 1
+        while j >= 0 and (lines[j].strip() == '' or lines[j].strip().startswith('#')):
+            j -= 1
+        if j >= 0 and lines[j].strip().startswith('"'):
+            drop.add(j)
+        # also drop any comment line immediately before the command
+        k = j - 1
+        if k >= 0 and lines[k].strip().startswith('#'):
+            drop.add(k)
+kept = [ln for i, ln in enumerate(lines) if i not in drop]
+# trim trailing blank lines then write
+content = ''.join(kept).rstrip('\n') + '\n'
+open(path, 'w').write(content)
+PY
+    echo "  xbindkeys: removed old binding(s) for Control+Shift+Alt+r"
   fi
+
+  printf '\n# simple-screen-capture\n"/usr/bin/simple-screen-capture"\n  Control+Shift+Alt+r\n' >> "$xbrc"
+  echo "  xbindkeys: binding added to $xbrc"
 
   local autostart="$HOME/.config/autostart/xbindkeys.desktop"
   mkdir -p "$(dirname "$autostart")"
@@ -198,11 +270,11 @@ fi
 result=$(/usr/bin/python3 /usr/bin/capture-menu 2>/dev/null) || true
 [[ -z "$result" ]] && exit 0
 
-read -r action clipboard <<< "$result"
+read -r action clipboard smart_slice threshold <<< "$result"
 
 case "$action" in
   screenshot) do_screenshot "$clipboard" ;;
-  gif)        do_gif ;;
-  screen)     do_record "no" ;;
-  audio)      do_record "yes" ;;
+  gif)        do_gif           "$smart_slice" "$threshold" ;;
+  screen)     do_record "no"   "$smart_slice" "$threshold" ;;
+  audio)      do_record "yes"  "$smart_slice" "$threshold" ;;
 esac
