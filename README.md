@@ -8,7 +8,7 @@ Screenshot, GIF, and screencast capture for Ubuntu/PopOS (X11) with a floating G
 bash <(curl -fsSL https://github.com/KerryRitter/simple-screen-capture/releases/latest/download/install.sh)
 ```
 
-Press `Ctrl+Shift+Alt+R` to open the capture menu.
+Press `Ctrl+Shift+Alt+4` to open the capture menu.
 
 ## Features
 
@@ -22,7 +22,7 @@ Press `Ctrl+Shift+Alt+R` to open the capture menu.
 ## Build from source
 
 ```bash
-bash build.sh 1.4.0
-sudo apt install ./simple-screen-capture_1.4.0_all.deb
+bash build.sh 1.7.0
+sudo apt install ./simple-screen-capture_1.7.0_all.deb
 simple-screen-capture --setup
 ```

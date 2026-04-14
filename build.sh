@@ -22,4 +22,5 @@ install -m 755 src/capture-xbindkeys-start  "/tmp/$PKG/usr/bin/capture-xbindkeys
 sed "s/^Version: .*/Version: $VERSION/" debian/control > "/tmp/$PKG/DEBIAN/control"
 
 dpkg-deb --build --root-owner-group "/tmp/$PKG" "${PKG}.deb"
+chmod 644 "${PKG}.deb"
 echo "Built: ${PKG}.deb ($(du -h "${PKG}.deb" | cut -f1))"

@@ -197,68 +197,55 @@ do_record() {
 
 # ── setup mode ────────────────────────────────────────────────────────────────
 do_setup() {
-  echo "Setting up simple-screen-capture shortcut (Ctrl+Shift+Alt+R)..."
+  echo "Setting up simple-screen-capture shortcut (Ctrl+Shift+Alt+4)..."
 
-  gsettings set org.gnome.shell.keybindings show-screen-recording-ui "[]"
-  echo "  GNOME screen-recording shortcut cleared"
+  local binding="<Primary><Shift><Alt>4"
+  local schema="org.gnome.settings-daemon.plugins.media-keys"
+  local base_path="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings"
 
-  local xbrc="$HOME/.xbindkeysrc"
+  # Find any existing slot that already owns our binding and update it in-place.
+  # This avoids fighting list-management resets by GNOME/PopOS.
+  local existing target_slot=""
+  existing=$(gsettings get "$schema" custom-keybindings)
+  local cleaned
+  cleaned=$(echo "$existing" | tr -d "[]'" | tr ',' '\n' | sed 's/^[[:space:]]*//' | grep -v '^$')
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    local entry_binding
+    entry_binding=$(gsettings get "${schema}.custom-keybinding:${entry}" binding 2>/dev/null || true)
+    entry_binding=$(echo "$entry_binding" | tr -d "'")
+    if [[ "$entry_binding" == "$binding" ]]; then
+      target_slot="$entry"
+      break
+    fi
+  done <<< "$cleaned"
 
-  # Remove any existing binding for this key (old 'capture' entry, duplicates, etc.)
-  # A binding block is: one command line + one key line. We delete the command line
-  # immediately preceding any line that mentions Control+Shift+Alt+r.
-  if grep -qi 'Control+Shift+Alt+r' "$xbrc" 2>/dev/null; then
-    # Use a temp file: drop every line N-1 where line N matches the key
-    python3 - "$xbrc" <<'PY'
-import sys, re
-path = sys.argv[1]
-lines = open(path).readlines()
-key_pat = re.compile(r'Control\+Shift\+Alt\+r', re.IGNORECASE)
-drop = set()
-for i, ln in enumerate(lines):
-    if key_pat.search(ln):
-        drop.add(i)          # the key line itself
-        # walk back to find the command line (skip blank/comment lines)
-        j = i - 1
-        while j >= 0 and (lines[j].strip() == '' or lines[j].strip().startswith('#')):
-            j -= 1
-        if j >= 0 and lines[j].strip().startswith('"'):
-            drop.add(j)
-        # also drop any comment line immediately before the command
-        k = j - 1
-        if k >= 0 and lines[k].strip().startswith('#'):
-            drop.add(k)
-kept = [ln for i, ln in enumerate(lines) if i not in drop]
-# trim trailing blank lines then write
-content = ''.join(kept).rstrip('\n') + '\n'
-open(path, 'w').write(content)
-PY
-    echo "  xbindkeys: removed old binding(s) for Control+Shift+Alt+r"
+  if [[ -n "$target_slot" ]]; then
+    # Update the existing slot in-place — keep it in the list, just fix its command/name
+    echo "  Found existing slot at ${target_slot} — updating in-place"
+    dconf write "${target_slot}name"    "'Simple Screen Capture'"
+    dconf write "${target_slot}command" "'/usr/bin/simple-screen-capture'"
+    dconf write "${target_slot}binding" "'${binding}'"
+  else
+    # No existing slot — add a new one
+    local slot_name="simple-screen-capture"
+    local slot_path="${base_path}/${slot_name}/"
+    local updated=()
+    while IFS= read -r entry; do
+      [[ -z "$entry" ]] && updated+=("'${entry}'")
+    done <<< "$cleaned"
+    updated+=("'${slot_path}'")
+    local new_list
+    new_list="[$(IFS=,; echo "${updated[*]:-}")]"
+    gsettings set "$schema" custom-keybindings "$new_list"
+    dconf write "${slot_path}name"    "'Simple Screen Capture'"
+    dconf write "${slot_path}command" "'/usr/bin/simple-screen-capture'"
+    dconf write "${slot_path}binding" "'${binding}'"
+    echo "  GNOME custom keybinding registered (${slot_path})"
   fi
 
-  printf '\n# simple-screen-capture\n"/usr/bin/simple-screen-capture"\n  Control+Shift+Alt+r\n' >> "$xbrc"
-  echo "  xbindkeys: binding added to $xbrc"
-
-  local autostart="$HOME/.config/autostart/xbindkeys.desktop"
-  mkdir -p "$(dirname "$autostart")"
-  cat > "$autostart" << 'DESKTOP'
-[Desktop Entry]
-Type=Application
-Name=xbindkeys
-Exec=/usr/bin/capture-xbindkeys-start
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-DESKTOP
-  echo "  autostart: $autostart"
-
-  pkill xbindkeys 2>/dev/null || true
-  sleep 0.2
-  xbindkeys
-  echo "  xbindkeys: started"
-
   echo ""
-  echo "Done. Press Ctrl+Shift+Alt+R to open the capture menu."
+  echo "Done. Press Ctrl+Shift+Alt+4 to open the capture menu."
 }
 
 # ── main ──────────────────────────────────────────────────────────────────────
