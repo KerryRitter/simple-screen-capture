@@ -1,17 +1,11 @@
 #!/usr/bin/python3
 """Full-screen region selector with integrated capture menu.
 
-Click-and-drag anywhere to redraw the region; drag inside to move; drag edges/corners to resize.
-The bottom toolbar switches mode and tweaks per-mode settings.
-
-Emits on confirm:
-    MODE CLIPBOARD_MODE SMART_SLICE THRESHOLD X Y W H
-
+Click-and-drag to define region; drag inside to move; drag edges/corners to resize.
+Emits on confirm:  MODE CLIPBOARD_MODE SMART_SLICE THRESHOLD X Y W H
 Exits silently on cancel.
 """
-import gi, sys, os
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, Gdk, GLib
+import sys, os, platform
 
 CONFIG_DIR       = os.path.expanduser('~/.config/capture')
 CLIP_MODE_FILE   = os.path.join(CONFIG_DIR, 'clipboard_mode')
@@ -30,17 +24,15 @@ MODES = [
     ('audio',      '🎤', 'Audio',       '🎤  Record'),
 ]
 
+# ── config helpers ────────────────────────────────────────────────────────────
 
 def _read(path, default):
-    try:
-        return open(path).read().strip()
-    except Exception:
-        return default
+    try:    return open(path).read().strip()
+    except: return default
 
 def _write(path, value):
     os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(path, 'w') as f:
-        f.write(str(value))
+    open(path, 'w').write(str(value))
 
 def get_clipboard_mode():
     v = _read(CLIP_MODE_FILE, 'base64')
@@ -50,10 +42,8 @@ def get_smart_slice():
     return _read(SMART_SLICE_FILE, '0') == '1'
 
 def get_threshold():
-    try:
-        return max(0.02, min(0.25, float(_read(THRESHOLD_FILE, '0.07'))))
-    except ValueError:
-        return 0.07
+    try:    return max(0.02, min(0.25, float(_read(THRESHOLD_FILE, '0.07'))))
+    except: return 0.07
 
 def get_last_mode():
     v = _read(LAST_MODE_FILE, 'screenshot')
@@ -68,587 +58,787 @@ def get_last_region_for(mode):
         parts = open(path).read().strip().split()
         if len(parts) == 4:
             return tuple(int(p) for p in parts)
-    except Exception:
-        pass
+    except: pass
     return None
 
+def _save_result(mode, clipboard_mode, smart_slice, threshold, sx, sy, sel_w, sel_h):
+    w = sel_w + (sel_w % 2)
+    h = sel_h + (sel_h % 2)
+    _write(CLIP_MODE_FILE,   clipboard_mode)
+    _write(SMART_SLICE_FILE, '1' if smart_slice else '0')
+    _write(THRESHOLD_FILE,   f'{threshold:.3f}')
+    _write(LAST_MODE_FILE,   mode)
+    _write(os.path.join(CONFIG_DIR, _region_key(mode)), f'{sx} {sy} {sel_w} {sel_h}')
+    smart = '1' if (smart_slice and mode != 'screenshot') else '0'
+    return f'{mode} {clipboard_mode} {smart} {threshold:.3f} {sx} {sy} {w} {h}'
 
-class RegionSelector(Gtk.Window):
-    def __init__(self):
-        super().__init__(type=Gtk.WindowType.TOPLEVEL)
 
-        self.mode           = get_last_mode()
-        self.clipboard_mode = get_clipboard_mode()
-        self.smart_slice    = get_smart_slice()
-        self.threshold      = get_threshold()
+# ══════════════════════════════════════════════════════════════════════════════
+# Linux / GTK3
+# ══════════════════════════════════════════════════════════════════════════════
 
-        self.set_decorated(False)
-        self.set_resizable(False)
-        self.set_keep_above(True)
-        self.set_skip_taskbar_hint(True)
-        self.set_skip_pager_hint(True)
-        self.set_can_focus(True)
+def run_gtk():
+    import gi
+    gi.require_version('Gtk', '3.0')
+    from gi.repository import Gtk, Gdk, GLib
 
-        screen = self.get_screen()
-        visual = screen.get_rgba_visual()
-        if visual:
-            self.set_visual(visual)
-        self.set_app_paintable(True)
+    class RegionSelector(Gtk.Window):
+        def __init__(self):
+            super().__init__(type=Gtk.WindowType.TOPLEVEL)
 
-        # Target the monitor the cursor is on; we'll fullscreen onto it after show.
-        display = Gdk.Display.get_default()
-        root    = Gdk.get_default_root_window()
-        _, cx, cy, _ = root.get_pointer()
-        monitor = display.get_monitor_at_point(cx, cy)
-        geo     = monitor.get_geometry()
-        self.mon_x, self.mon_y = geo.x, geo.y
-        self.scr_w, self.scr_h = geo.width, geo.height
+            self.mode           = get_last_mode()
+            self.clipboard_mode = get_clipboard_mode()
+            self.smart_slice    = get_smart_slice()
+            self.threshold      = get_threshold()
+            self._result        = None
 
-        self._monitor_num = 0
-        for i in range(display.get_n_monitors()):
-            if display.get_monitor(i) == monitor:
-                self._monitor_num = i
-                break
+            self.set_decorated(False)
+            self.set_resizable(False)
+            self.set_keep_above(True)
+            self.set_skip_taskbar_hint(True)
+            self.set_skip_pager_hint(True)
+            self.set_can_focus(True)
 
-        self.set_default_size(self.scr_w, self.scr_h)
+            screen = self.get_screen()
+            visual = screen.get_rgba_visual()
+            if visual:
+                self.set_visual(visual)
+            self.set_app_paintable(True)
 
-        # Initial selection in window-local coords (stored last_region is in screen coords)
-        last_region = get_last_region_for(self.mode)
-        if last_region:
-            rx, ry, rw, rh = last_region
-            self.sel_x = rx - self.mon_x
-            self.sel_y = ry - self.mon_y
-            self.sel_w, self.sel_h = rw, rh
-        else:
-            w, h = 720, 450
-            self.sel_x = max(0, (self.scr_w - w) // 2)
-            self.sel_y = max(0, (self.scr_h - h) // 2)
-            self.sel_w, self.sel_h = w, h
+            display = Gdk.Display.get_default()
+            root    = Gdk.get_default_root_window()
+            _, cx, cy, _ = root.get_pointer()
+            monitor = display.get_monitor_at_point(cx, cy)
+            geo     = monitor.get_geometry()
+            self.mon_x, self.mon_y = geo.x, geo.y
+            self.scr_w, self.scr_h = geo.width, geo.height
 
-        self.drag_mode       = None
-        self.drag_origin     = (0, 0)
-        self.drag_start_rect = None
-        self.drag_was_new    = False
+            self._monitor_num = 0
+            for i in range(display.get_n_monitors()):
+                if display.get_monitor(i) == monitor:
+                    self._monitor_num = i
+                    break
 
-        self.connect('delete-event',    lambda *_: Gtk.main_quit())
-        self.connect('key-press-event', self._on_key)
+            self.set_default_size(self.scr_w, self.scr_h)
 
-        self._build_ui()
-        self._apply_css()
-        self._sync_mode()
-        self._reposition_toolbar()
+            last_region = get_last_region_for(self.mode)
+            if last_region:
+                rx, ry, rw, rh = last_region
+                self.sel_x = rx - self.mon_x
+                self.sel_y = ry - self.mon_y
+                self.sel_w, self.sel_h = rw, rh
+            else:
+                w, h = 720, 450
+                self.sel_x = max(0, (self.scr_w - w) // 2)
+                self.sel_y = max(0, (self.scr_h - h) // 2)
+                self.sel_w, self.sel_h = w, h
 
-    # ── UI ────────────────────────────────────────────────────────────────────
-    def _build_ui(self):
-        overlay = Gtk.Overlay()
-        self.add(overlay)
+            self.drag_mode       = None
+            self.drag_origin     = (0, 0)
+            self.drag_start_rect = None
+            self.drag_was_new    = False
 
-        self.da = Gtk.DrawingArea()
-        self.da.add_events(
-            Gdk.EventMask.BUTTON_PRESS_MASK   |
-            Gdk.EventMask.BUTTON_RELEASE_MASK |
-            Gdk.EventMask.POINTER_MOTION_MASK
-        )
-        self.da.connect('draw',                 self._on_draw)
-        self.da.connect('button-press-event',   self._on_press)
-        self.da.connect('button-release-event', self._on_release)
-        self.da.connect('motion-notify-event',  self._on_motion)
-        overlay.add(self.da)
+            self.connect('delete-event',    lambda *_: Gtk.main_quit())
+            self.connect('key-press-event', self._on_key)
 
-        self._build_toolbar(overlay)
+            self._build_ui()
+            self._apply_css()
+            self._sync_mode()
+            self._reposition_toolbar()
 
-    def _build_toolbar(self, overlay):
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        outer.set_halign(Gtk.Align.CENTER)
-        outer.set_valign(Gtk.Align.END)
-        outer.set_margin_bottom(28)
-        outer.set_margin_top(28)
-        overlay.add_overlay(outer)
-        overlay.set_overlay_pass_through(outer, False)
-        self.toolbar = outer
+        def _build_ui(self):
+            overlay = Gtk.Overlay()
+            self.add(overlay)
 
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        bar.set_name('toolbar')
-        outer.pack_start(bar, False, False, 0)
+            self.da = Gtk.DrawingArea()
+            self.da.add_events(
+                Gdk.EventMask.BUTTON_PRESS_MASK   |
+                Gdk.EventMask.BUTTON_RELEASE_MASK |
+                Gdk.EventMask.POINTER_MOTION_MASK
+            )
+            self.da.connect('draw',                 self._on_draw)
+            self.da.connect('button-press-event',   self._on_press)
+            self.da.connect('button-release-event', self._on_release)
+            self.da.connect('motion-notify-event',  self._on_motion)
+            overlay.add(self.da)
+            self._build_toolbar(overlay)
 
-        # ── mode tabs ────────────────────────────────────────────────────────
-        mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        mode_box.set_name('mode-box')
-        self._mode_buttons = {}
-        for mode_id, icon, label, _ in MODES:
-            btn = Gtk.Button()
-            btn.set_name('mode-btn')
-            lbl = Gtk.Label(label=f'{icon}  {label}')
-            lbl.set_name('mode-btn-lbl')
-            btn.add(lbl)
-            btn.connect('clicked', lambda _w, m=mode_id: self._set_mode(m))
-            mode_box.pack_start(btn, False, False, 0)
-            self._mode_buttons[mode_id] = btn
-        bar.pack_start(mode_box, False, False, 0)
+        def _build_toolbar(self, overlay):
+            outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            outer.set_halign(Gtk.Align.CENTER)
+            outer.set_valign(Gtk.Align.END)
+            outer.set_margin_bottom(28)
+            outer.set_margin_top(28)
+            overlay.add_overlay(outer)
+            overlay.set_overlay_pass_through(outer, False)
+            self.toolbar = outer
 
-        bar.pack_start(self._make_vsep(), False, False, 0)
+            bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+            bar.set_name('toolbar')
+            outer.pack_start(bar, False, False, 0)
 
-        # ── contextual settings (swapped on mode change) ─────────────────────
-        self.ctx_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.ctx_box.set_name('ctx-box')
-        bar.pack_start(self.ctx_box, False, False, 0)
+            mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            mode_box.set_name('mode-box')
+            self._mode_buttons = {}
+            for mode_id, icon, label, _ in MODES:
+                btn = Gtk.Button()
+                btn.set_name('mode-btn')
+                lbl = Gtk.Label(label=f'{icon}  {label}')
+                lbl.set_name('mode-btn-lbl')
+                btn.add(lbl)
+                btn.connect('clicked', lambda _w, m=mode_id: self._set_mode(m))
+                mode_box.pack_start(btn, False, False, 0)
+                self._mode_buttons[mode_id] = btn
+            bar.pack_start(mode_box, False, False, 0)
+            bar.pack_start(self._make_vsep(), False, False, 0)
 
-        bar.pack_start(self._make_vsep(), False, False, 0)
+            self.ctx_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            self.ctx_box.set_name('ctx-box')
+            bar.pack_start(self.ctx_box, False, False, 0)
+            bar.pack_start(self._make_vsep(), False, False, 0)
 
-        # ── action buttons ───────────────────────────────────────────────────
-        act_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        act_box.set_name('act-box')
+            act_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
 
-        self.cancel_btn = Gtk.Button(label='✕  Cancel')
-        self.cancel_btn.set_name('cancel-btn')
-        self.cancel_btn.connect('clicked', lambda *_: Gtk.main_quit())
-        act_box.pack_start(self.cancel_btn, False, False, 0)
+            self.cancel_btn = Gtk.Button(label='✕  Cancel')
+            self.cancel_btn.set_name('cancel-btn')
+            self.cancel_btn.connect('clicked', lambda *_: Gtk.main_quit())
+            act_box.pack_start(self.cancel_btn, False, False, 0)
 
-        self.capture_btn = Gtk.Button(label='📸  Capture')
-        self.capture_btn.set_name('capture-btn')
-        self.capture_btn.connect('clicked', self._confirm)
-        act_box.pack_start(self.capture_btn, False, False, 0)
+            self.capture_btn = Gtk.Button(label='📸  Capture')
+            self.capture_btn.set_name('capture-btn')
+            self.capture_btn.connect('clicked', self._confirm)
+            act_box.pack_start(self.capture_btn, False, False, 0)
 
-        bar.pack_start(act_box, False, False, 0)
+            bar.pack_start(act_box, False, False, 0)
 
-    def _make_vsep(self):
-        sep = Gtk.Box()
-        sep.set_name('vsep')
-        sep.set_size_request(1, -1)
-        return sep
+        def _make_vsep(self):
+            sep = Gtk.Box()
+            sep.set_name('vsep')
+            sep.set_size_request(1, -1)
+            return sep
 
-    # ── contextual sections ───────────────────────────────────────────────────
-    def _build_screenshot_ctx(self):
-        lbl = Gtk.Label(label='Clipboard')
-        lbl.set_name('ctx-lbl')
-        self.ctx_box.pack_start(lbl, False, False, 0)
+        def _build_screenshot_ctx(self):
+            lbl = Gtk.Label(label='Clipboard')
+            lbl.set_name('ctx-lbl')
+            self.ctx_box.pack_start(lbl, False, False, 0)
+            self._clip_buttons = {}
+            for val, label in (('binary', 'Image'), ('base64', 'Base64'), ('url', 'URL')):
+                btn = Gtk.Button(label=label)
+                btn.connect('clicked', lambda _w, v=val: self._set_clipboard(v))
+                self.ctx_box.pack_start(btn, False, False, 0)
+                self._clip_buttons[val] = btn
+            self._refresh_clipboard_buttons()
 
-        self._clip_buttons = {}
-        for val, label in (('binary', 'Image'), ('base64', 'Base64'), ('url', 'URL')):
-            btn = Gtk.Button(label=label)
-            btn.connect('clicked', lambda _w, v=val: self._set_clipboard(v))
-            self.ctx_box.pack_start(btn, False, False, 0)
-            self._clip_buttons[val] = btn
+        def _build_recording_ctx(self):
+            self._url_cb = Gtk.CheckButton(label='Copy URL')
+            self._url_cb.set_name('slice-cb')
+            self._url_cb.set_active(self.clipboard_mode == 'url')
+            self._url_cb.connect('toggled', self._on_url_toggled)
+            self.ctx_box.pack_start(self._url_cb, False, False, 0)
 
-        self._refresh_clipboard_buttons()
+            self._slice_cb = Gtk.CheckButton(label='Smart Slice')
+            self._slice_cb.set_name('slice-cb')
+            self._slice_cb.set_active(self.smart_slice)
+            self._slice_cb.connect('toggled', self._on_smart_slice_toggled)
+            self.ctx_box.pack_start(self._slice_cb, False, False, 0)
 
-    def _build_recording_ctx(self):
-        self._url_cb = Gtk.CheckButton(label='Copy URL')
-        self._url_cb.set_name('slice-cb')
-        self._url_cb.set_active(self.clipboard_mode == 'url')
-        self._url_cb.connect('toggled', self._on_url_toggled)
-        self.ctx_box.pack_start(self._url_cb, False, False, 0)
+            self._sens_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            sens_lbl = Gtk.Label(label='Sensitivity')
+            sens_lbl.set_name('ctx-lbl')
+            self._sens_box.pack_start(sens_lbl, False, False, 0)
 
-        self._slice_cb = Gtk.CheckButton(label='Smart Slice')
-        self._slice_cb.set_name('slice-cb')
-        self._slice_cb.set_active(self.smart_slice)
-        self._slice_cb.connect('toggled', self._on_smart_slice_toggled)
-        self.ctx_box.pack_start(self._slice_cb, False, False, 0)
+            self._sens_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.02, 0.25, 0.01)
+            self._sens_scale.set_name('sens-scale')
+            self._sens_scale.set_value(self.threshold)
+            self._sens_scale.set_draw_value(False)
+            self._sens_scale.set_size_request(140, -1)
+            self._sens_scale.set_inverted(True)
+            self._sens_scale.connect('value-changed', self._on_threshold_change)
+            self._sens_box.pack_start(self._sens_scale, False, False, 0)
+            self.ctx_box.pack_start(self._sens_box, False, False, 0)
 
-        self._sens_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        sens_lbl = Gtk.Label(label='Sensitivity')
-        sens_lbl.set_name('ctx-lbl')
-        self._sens_box.pack_start(sens_lbl, False, False, 0)
+        def _sync_mode(self):
+            for mid, btn in self._mode_buttons.items():
+                btn.set_name('mode-btn-active' if mid == self.mode else 'mode-btn')
+            for child in self.ctx_box.get_children():
+                self.ctx_box.remove(child)
+            if self.mode == 'screenshot':
+                self._build_screenshot_ctx()
+            else:
+                self._build_recording_ctx()
+            label = next(bl for mid, _i, _l, bl in MODES if mid == self.mode)
+            self.capture_btn.set_label(label)
+            self.ctx_box.show_all()
+            if self.mode != 'screenshot':
+                self._sens_box.set_visible(self.smart_slice)
 
-        self._sens_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.02, 0.25, 0.01)
-        self._sens_scale.set_name('sens-scale')
-        self._sens_scale.set_value(self.threshold)
-        self._sens_scale.set_draw_value(False)
-        self._sens_scale.set_size_request(140, -1)
-        self._sens_scale.set_inverted(True)  # right = more sensitive (lower threshold)
-        self._sens_scale.connect('value-changed', self._on_threshold_change)
-        self._sens_box.pack_start(self._sens_scale, False, False, 0)
+        def _set_mode(self, mode):
+            if mode == self.mode:
+                return
+            last = get_last_region_for(mode)
+            self.mode = mode
+            if last:
+                rx, ry, rw, rh = last
+                self.sel_x, self.sel_y = rx - self.mon_x, ry - self.mon_y
+                self.sel_w, self.sel_h = rw, rh
+                self._reposition_toolbar()
+                self.da.queue_draw()
+            self._sync_mode()
 
-        self.ctx_box.pack_start(self._sens_box, False, False, 0)
+        def _set_clipboard(self, mode):
+            self.clipboard_mode = mode
+            self._refresh_clipboard_buttons()
 
-    def _sync_mode(self):
-        for mid, btn in self._mode_buttons.items():
-            btn.set_name('mode-btn-active' if mid == self.mode else 'mode-btn')
+        def _refresh_clipboard_buttons(self):
+            for val, btn in self._clip_buttons.items():
+                btn.set_name('fmt-active' if val == self.clipboard_mode else 'fmt-btn')
 
-        for child in self.ctx_box.get_children():
-            self.ctx_box.remove(child)
-        if self.mode == 'screenshot':
-            self._build_screenshot_ctx()
-        else:
-            self._build_recording_ctx()
+        def _on_url_toggled(self, cb):
+            self.clipboard_mode = 'url' if cb.get_active() else 'binary'
 
-        label = next(bl for mid, _i, _l, bl in MODES if mid == self.mode)
-        self.capture_btn.set_label(label)
-
-        self.ctx_box.show_all()
-        if self.mode != 'screenshot':
+        def _on_smart_slice_toggled(self, cb):
+            self.smart_slice = cb.get_active()
             self._sens_box.set_visible(self.smart_slice)
 
-    def _set_mode(self, mode):
-        if mode == self.mode:
-            return
-        # Recall this mode's last region (stored in screen coords → convert)
-        last = get_last_region_for(mode)
-        self.mode = mode
-        if last:
-            rx, ry, rw, rh = last
-            self.sel_x, self.sel_y = rx - self.mon_x, ry - self.mon_y
-            self.sel_w, self.sel_h = rw, rh
+        def _on_threshold_change(self, scale):
+            self.threshold = scale.get_value()
+
+        def _reposition_toolbar(self):
+            if self.sel_y + self.sel_h > self.scr_h - 100:
+                self.toolbar.set_valign(Gtk.Align.START)
+            else:
+                self.toolbar.set_valign(Gtk.Align.END)
+
+        def _apply_css(self):
+            css = b"""
+            window { background-color: rgba(0,0,0,0); }
+            #toolbar {
+                background-color: rgba(24,24,37,0.96);
+                border: 1px solid #313244; border-radius: 12px; padding: 6px 8px;
+            }
+            #vsep { background-color: #313244; margin: 6px 8px; }
+            #mode-btn, #mode-btn-active {
+                background-image: none; background-color: transparent;
+                border: 1px solid transparent; border-radius: 8px; padding: 6px 12px;
+                box-shadow: none; text-shadow: none; color: #cdd6f4;
+            }
+            #mode-btn:hover { background-image: none; background-color: rgba(69,71,90,0.55); }
+            #mode-btn-active {
+                background-image: none; background-color: rgba(137,180,250,0.15);
+                border-color: rgba(137,180,250,0.45); color: #89b4fa;
+            }
+            #mode-btn-lbl { color: inherit; font-size: 12px; }
+            #ctx-lbl { color: #a6adc8; font-size: 11px; padding-right: 2px; }
+            #fmt-btn, #fmt-active {
+                background-image: none; border-radius: 6px; padding: 3px 10px;
+                font-size: 11px; min-height: 0; box-shadow: none; text-shadow: none;
+            }
+            #fmt-btn { background-color: transparent; color: #585b70; border: 1px solid #45475a; }
+            #fmt-btn:hover { background-color: #313244; color: #a6adc8; }
+            #fmt-active {
+                background-color: rgba(137,180,250,0.15); color: #89b4fa; border: 1px solid #89b4fa;
+            }
+            checkbutton#slice-cb { color: #cdd6f4; font-size: 12px; }
+            checkbutton#slice-cb check {
+                background-color: #313244; border-color: #45475a;
+                border-radius: 3px; min-width: 13px; min-height: 13px;
+            }
+            checkbutton#slice-cb:checked check { background-color: #89b4fa; border-color: #89b4fa; }
+            scale#sens-scale { padding: 0 4px; }
+            scale#sens-scale trough { background-color: #313244; border-radius: 3px; min-height: 4px; }
+            scale#sens-scale trough highlight, scale#sens-scale trough fill {
+                background-color: #89b4fa; border-radius: 3px;
+            }
+            scale#sens-scale slider {
+                background-color: #89b4fa; border: none; border-radius: 50%;
+                min-width: 13px; min-height: 13px; box-shadow: none;
+            }
+            #cancel-btn {
+                background-image: none; background-color: transparent; color: #a6adc8;
+                border: 1px solid #45475a; border-radius: 8px; padding: 6px 14px;
+                font-size: 12px; box-shadow: none; text-shadow: none;
+            }
+            #cancel-btn:hover { background-color: #313244; color: #cdd6f4; }
+            #capture-btn, #capture-btn:focus, #capture-btn:active, #capture-btn:checked {
+                background-image: none; background-color: #89b4fa; color: #1e1e2e;
+                border: none; border-radius: 8px; padding: 6px 18px;
+                font-size: 12px; font-weight: bold; box-shadow: none; text-shadow: none;
+            }
+            #capture-btn:hover { background-image: none; background-color: #a6c8fc; }
+            """
+            p = Gtk.CssProvider()
+            p.load_from_data(css)
+            Gtk.StyleContext.add_provider_for_screen(
+                self.get_screen(), p, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        def _on_draw(self, da, cr):
+            a = da.get_allocation()
+            W, H = a.width, a.height
+            sx, sy, sw, sh = self.sel_x, self.sel_y, self.sel_w, self.sel_h
+            cx1 = max(0, min(sx, W));      cy1 = max(0, min(sy, H))
+            cx2 = max(0, min(sx+sw, W));   cy2 = max(0, min(sy+sh, H))
+            cr.set_source_rgba(0, 0, 0, 0.45)
+            cr.rectangle(0, 0, W, cy1);               cr.fill()
+            cr.rectangle(0, cy2, W, H-cy2);           cr.fill()
+            cr.rectangle(0, cy1, cx1, cy2-cy1);       cr.fill()
+            cr.rectangle(cx2, cy1, W-cx2, cy2-cy1);   cr.fill()
+            if sw < 2 or sh < 2:
+                return False
+            cr.set_source_rgba(0.537, 0.706, 0.980, 0.95)
+            cr.set_line_width(2.0); cr.set_dash([12, 6])
+            cr.rectangle(sx+1, sy+1, sw-2, sh-2); cr.stroke()
+            cr.set_dash([])
+            cr.set_source_rgba(0.537, 0.706, 0.980, 1.0)
+            sq = 10
+            for hx, hy in [(sx,sy),(sx+sw,sy),(sx,sy+sh),(sx+sw,sy+sh)]:
+                cr.rectangle(hx-sq/2, hy-sq/2, sq, sq); cr.fill()
+            text = f'{sw} × {sh}'
+            cr.select_font_face('Sans'); cr.set_font_size(13)
+            ext  = cr.text_extents(text)
+            bw, bh = ext.width+14, 22
+            bx = sx; by = sy-bh-6
+            if by < 2: by = sy+6
+            cr.set_source_rgba(0.118, 0.118, 0.180, 0.92)
+            cr.rectangle(bx, by, bw, bh); cr.fill()
+            cr.set_source_rgba(0.804, 0.839, 0.957, 1.0)
+            cr.move_to(bx+7, by+bh-7); cr.show_text(text)
+            return False
+
+        def _hit_test(self, x, y):
+            sx, sy, sw, sh = self.sel_x, self.sel_y, self.sel_w, self.sel_h
+            if not (sx-EDGE <= x <= sx+sw+EDGE and sy-EDGE <= y <= sy+sh+EDGE):
+                return 'new'
+            nl = x <= sx+EDGE; nr = x >= sx+sw-EDGE
+            nt = y <= sy+EDGE; nb = y >= sy+sh-EDGE
+            if nt and nl: return 'nw'
+            if nt and nr: return 'ne'
+            if nb and nl: return 'sw'
+            if nb and nr: return 'se'
+            if nl: return 'w'
+            if nr: return 'e'
+            if nt: return 'n'
+            if nb: return 's'
+            return 'move'
+
+        _CURS = {
+            'move':'move','nw':'nw-resize','ne':'ne-resize','sw':'sw-resize','se':'se-resize',
+            'w':'w-resize','e':'e-resize','n':'n-resize','s':'s-resize','new':'crosshair',
+        }
+
+        def _set_cursor(self, mode):
+            name = self._CURS.get(mode, 'default')
+            disp = self.get_display(); gw = self.da.get_window()
+            if not (disp and gw): return
+            try:    gw.set_cursor(Gdk.Cursor.new_from_name(disp, name))
+            except: pass
+
+        def _on_press(self, widget, event):
+            if event.button != 1: return False
+            x, y = event.x, event.y
+            mode = self._hit_test(x, y)
+            self.drag_origin = (x, y)
+            self.drag_start_rect = (self.sel_x, self.sel_y, self.sel_w, self.sel_h)
+            self.drag_was_new = (mode == 'new')
+            if mode == 'new':
+                self.sel_x, self.sel_y = int(x), int(y)
+                self.sel_w, self.sel_h = 0, 0
+                self.drag_start_rect = (int(x), int(y), 0, 0)
+                self.drag_mode = 'se'
+            else:
+                self.drag_mode = mode
+            self._set_cursor(self.drag_mode)
+            self.da.queue_draw()
+            return True
+
+        def _on_motion(self, widget, event):
+            if self.drag_mode is None:
+                self._set_cursor(self._hit_test(event.x, event.y))
+                return False
+            dx = event.x-self.drag_origin[0]; dy = event.y-self.drag_origin[1]
+            ox, oy, ow, oh = self.drag_start_rect
+            if self.drag_mode == 'move':
+                nx, ny, nw, nh = int(ox+dx), int(oy+dy), ow, oh
+            else:
+                nx, ny, nw, nh = ox, oy, ow, oh
+                if self.drag_mode in ('w','nw','sw'): nx=int(ox+dx); nw=int(ow-dx)
+                elif self.drag_mode in ('e','ne','se'): nw=int(ow+dx)
+                if self.drag_mode in ('n','nw','ne'): ny=int(oy+dy); nh=int(oh-dy)
+                elif self.drag_mode in ('s','sw','se'): nh=int(oh+dy)
+                if nw<0: nx+=nw; nw=-nw
+                if nh<0: ny+=nh; nh=-nh
+            self.sel_x, self.sel_y, self.sel_w, self.sel_h = nx, ny, nw, nh
             self._reposition_toolbar()
             self.da.queue_draw()
-        self._sync_mode()
+            return True
 
-    def _set_clipboard(self, mode):
-        self.clipboard_mode = mode
-        self._refresh_clipboard_buttons()
+        def _on_release(self, widget, event):
+            if self.drag_was_new and (self.sel_w<MIN_NEW_SIZE or self.sel_h<MIN_NEW_SIZE):
+                self.sel_x, self.sel_y, self.sel_w, self.sel_h = self.drag_start_rect
+                self.da.queue_draw()
+            self.drag_mode = None
+            self._reposition_toolbar()
+            self._set_cursor(self._hit_test(event.x, event.y))
+            return True
 
-    def _refresh_clipboard_buttons(self):
-        for val, btn in self._clip_buttons.items():
-            btn.set_name('fmt-active' if val == self.clipboard_mode else 'fmt-btn')
+        def _on_key(self, widget, event):
+            if event.keyval == Gdk.KEY_Escape:
+                Gtk.main_quit()
+            elif event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                self._confirm()
 
-    def _on_url_toggled(self, cb):
-        # URL on → clipboard_mode='url'; off → revert to 'binary' (recording default)
-        self.clipboard_mode = 'url' if cb.get_active() else 'binary'
+        def _confirm(self, *_):
+            self.hide()
+            GLib.timeout_add(DELAY_MS, self._emit)
 
-    def _on_smart_slice_toggled(self, cb):
-        self.smart_slice = cb.get_active()
-        self._sens_box.set_visible(self.smart_slice)
-
-    def _on_threshold_change(self, scale):
-        self.threshold = scale.get_value()
-
-    # ── toolbar auto-flip (bottom/top based on selection) ─────────────────────
-    def _reposition_toolbar(self):
-        toolbar_top = self.scr_h - 100
-        if self.sel_y + self.sel_h > toolbar_top:
-            self.toolbar.set_valign(Gtk.Align.START)
-        else:
-            self.toolbar.set_valign(Gtk.Align.END)
-
-    # ── CSS ───────────────────────────────────────────────────────────────────
-    def _apply_css(self):
-        css = b"""
-        window { background-color: rgba(0,0,0,0); }
-
-        #toolbar {
-            background-color: rgba(24, 24, 37, 0.96);
-            border: 1px solid #313244;
-            border-radius: 12px;
-            padding: 6px 8px;
-        }
-        #vsep {
-            background-color: #313244;
-            margin: 6px 8px;
-        }
-
-        /* Mode tabs */
-        #mode-btn, #mode-btn-active {
-            background-image: none;
-            background-color: transparent;
-            border: 1px solid transparent;
-            border-radius: 8px;
-            padding: 6px 12px;
-            box-shadow: none;
-            text-shadow: none;
-            color: #cdd6f4;
-        }
-        #mode-btn:hover {
-            background-image: none;
-            background-color: rgba(69, 71, 90, 0.55);
-        }
-        #mode-btn-active {
-            background-image: none;
-            background-color: rgba(137, 180, 250, 0.15);
-            border-color: rgba(137, 180, 250, 0.45);
-            color: #89b4fa;
-        }
-        #mode-btn-lbl { color: inherit; font-size: 12px; }
-
-        /* Context labels */
-        #ctx-lbl { color: #a6adc8; font-size: 11px; padding-right: 2px; }
-
-        /* Clipboard format toggle */
-        #fmt-btn, #fmt-active {
-            background-image: none;
-            border-radius: 6px;
-            padding: 3px 10px;
-            font-size: 11px;
-            min-height: 0;
-            box-shadow: none;
-            text-shadow: none;
-        }
-        #fmt-btn {
-            background-color: transparent;
-            color: #585b70;
-            border: 1px solid #45475a;
-        }
-        #fmt-btn:hover { background-color: #313244; color: #a6adc8; }
-        #fmt-active {
-            background-color: rgba(137, 180, 250, 0.15);
-            color: #89b4fa;
-            border: 1px solid #89b4fa;
-        }
-
-        /* Smart Slice checkbox */
-        checkbutton#slice-cb { color: #cdd6f4; font-size: 12px; }
-        checkbutton#slice-cb check {
-            background-color: #313244;
-            border-color: #45475a;
-            border-radius: 3px;
-            min-width: 13px;
-            min-height: 13px;
-        }
-        checkbutton#slice-cb:checked check {
-            background-color: #89b4fa;
-            border-color: #89b4fa;
-        }
-
-        /* Sensitivity slider */
-        scale#sens-scale { padding: 0 4px; }
-        scale#sens-scale trough {
-            background-color: #313244;
-            border-radius: 3px;
-            min-height: 4px;
-        }
-        scale#sens-scale trough highlight,
-        scale#sens-scale trough fill {
-            background-color: #89b4fa;
-            border-radius: 3px;
-        }
-        scale#sens-scale slider {
-            background-color: #89b4fa;
-            border: none;
-            border-radius: 50%;
-            min-width: 13px;
-            min-height: 13px;
-            box-shadow: none;
-        }
-
-        /* Action buttons */
-        #cancel-btn {
-            background-image: none;
-            background-color: transparent;
-            color: #a6adc8;
-            border: 1px solid #45475a;
-            border-radius: 8px;
-            padding: 6px 14px;
-            font-size: 12px;
-            box-shadow: none;
-            text-shadow: none;
-        }
-        #cancel-btn:hover { background-color: #313244; color: #cdd6f4; }
-
-        #capture-btn,
-        #capture-btn:focus,
-        #capture-btn:active,
-        #capture-btn:checked {
-            background-image: none;
-            background-color: #89b4fa;
-            color: #1e1e2e;
-            border: none;
-            border-radius: 8px;
-            padding: 6px 18px;
-            font-size: 12px;
-            font-weight: bold;
-            box-shadow: none;
-            text-shadow: none;
-        }
-        #capture-btn:hover {
-            background-image: none;
-            background-color: #a6c8fc;
-        }
-        """
-        p = Gtk.CssProvider()
-        p.load_from_data(css)
-        Gtk.StyleContext.add_provider_for_screen(
-            self.get_screen(), p, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-
-    # ── drawing ───────────────────────────────────────────────────────────────
-    def _on_draw(self, da, cr):
-        a = da.get_allocation()
-        W, H = a.width, a.height
-        sx, sy, sw, sh = self.sel_x, self.sel_y, self.sel_w, self.sel_h
-
-        cx1 = max(0, min(sx, W))
-        cy1 = max(0, min(sy, H))
-        cx2 = max(0, min(sx + sw, W))
-        cy2 = max(0, min(sy + sh, H))
-
-        cr.set_source_rgba(0, 0, 0, 0.45)
-        cr.rectangle(0,   0,   W,       cy1);       cr.fill()
-        cr.rectangle(0,   cy2, W,       H - cy2);   cr.fill()
-        cr.rectangle(0,   cy1, cx1,     cy2 - cy1); cr.fill()
-        cr.rectangle(cx2, cy1, W - cx2, cy2 - cy1); cr.fill()
-
-        if sw < 2 or sh < 2:
-            return False
-
-        cr.set_source_rgba(0.537, 0.706, 0.980, 0.95)
-        cr.set_line_width(2.0)
-        cr.set_dash([12, 6])
-        cr.rectangle(sx + 1, sy + 1, sw - 2, sh - 2)
-        cr.stroke()
-
-        cr.set_dash([])
-        cr.set_source_rgba(0.537, 0.706, 0.980, 1.0)
-        sq = 10
-        for (hx, hy) in [(sx, sy), (sx + sw, sy), (sx, sy + sh), (sx + sw, sy + sh)]:
-            cr.rectangle(hx - sq / 2, hy - sq / 2, sq, sq)
-            cr.fill()
-
-        text = f'{sw} × {sh}'
-        cr.select_font_face('Sans')
-        cr.set_font_size(13)
-        ext = cr.text_extents(text)
-        bg_w, bg_h = ext.width + 14, 22
-        bg_x = sx
-        bg_y = sy - bg_h - 6
-        if bg_y < 2:
-            bg_y = sy + 6
-        cr.set_source_rgba(0.118, 0.118, 0.180, 0.92)
-        cr.rectangle(bg_x, bg_y, bg_w, bg_h)
-        cr.fill()
-        cr.set_source_rgba(0.804, 0.839, 0.957, 1.0)
-        cr.move_to(bg_x + 7, bg_y + bg_h - 7)
-        cr.show_text(text)
-
-        return False
-
-    # ── hit testing ───────────────────────────────────────────────────────────
-    def _hit_test(self, x, y):
-        sx, sy, sw, sh = self.sel_x, self.sel_y, self.sel_w, self.sel_h
-        if not (sx - EDGE <= x <= sx + sw + EDGE and
-                sy - EDGE <= y <= sy + sh + EDGE):
-            return 'new'
-        near_left  = x <= sx + EDGE
-        near_right = x >= sx + sw - EDGE
-        near_top   = y <= sy + EDGE
-        near_bot   = y >= sy + sh - EDGE
-        if near_top and near_left:  return 'nw'
-        if near_top and near_right: return 'ne'
-        if near_bot and near_left:  return 'sw'
-        if near_bot and near_right: return 'se'
-        if near_left:  return 'w'
-        if near_right: return 'e'
-        if near_top:   return 'n'
-        if near_bot:   return 's'
-        return 'move'
-
-    CURSORS = {
-        'move':'move',
-        'nw':'nw-resize','ne':'ne-resize','sw':'sw-resize','se':'se-resize',
-        'w':'w-resize','e':'e-resize','n':'n-resize','s':'s-resize',
-        'new':'crosshair',
-    }
-
-    def _set_cursor_for_mode(self, mode):
-        name = self.CURSORS.get(mode, 'default')
-        disp = self.get_display()
-        gw   = self.da.get_window()
-        if not (disp and gw):
-            return
-        try:
-            cur = Gdk.Cursor.new_from_name(disp, name)
-        except Exception:
-            cur = None
-        gw.set_cursor(cur)
-
-    # ── mouse handlers ────────────────────────────────────────────────────────
-    def _on_press(self, widget, event):
-        if event.button != 1:
-            return False
-        x, y = event.x, event.y
-        mode = self._hit_test(x, y)
-        self.drag_origin     = (x, y)
-        self.drag_start_rect = (self.sel_x, self.sel_y, self.sel_w, self.sel_h)
-        self.drag_was_new    = (mode == 'new')
-
-        if mode == 'new':
-            self.sel_x, self.sel_y = int(x), int(y)
-            self.sel_w, self.sel_h = 0, 0
-            self.drag_start_rect   = (int(x), int(y), 0, 0)
-            self.drag_mode         = 'se'
-        else:
-            self.drag_mode = mode
-
-        self._set_cursor_for_mode(self.drag_mode)
-        self.da.queue_draw()
-        return True
-
-    def _on_motion(self, widget, event):
-        if self.drag_mode is None:
-            self._set_cursor_for_mode(self._hit_test(event.x, event.y))
-            return False
-
-        dx = event.x - self.drag_origin[0]
-        dy = event.y - self.drag_origin[1]
-        ox, oy, ow, oh = self.drag_start_rect
-
-        if self.drag_mode == 'move':
-            nx, ny = int(ox + dx), int(oy + dy)
-            nw, nh = ow, oh
-        else:
-            nx, ny, nw, nh = ox, oy, ow, oh
-            if self.drag_mode in ('w', 'nw', 'sw'):
-                nx = int(ox + dx); nw = int(ow - dx)
-            elif self.drag_mode in ('e', 'ne', 'se'):
-                nw = int(ow + dx)
-            if self.drag_mode in ('n', 'nw', 'ne'):
-                ny = int(oy + dy); nh = int(oh - dy)
-            elif self.drag_mode in ('s', 'sw', 'se'):
-                nh = int(oh + dy)
-            if nw < 0:
-                nx += nw; nw = -nw
-            if nh < 0:
-                ny += nh; nh = -nh
-
-        self.sel_x, self.sel_y, self.sel_w, self.sel_h = nx, ny, nw, nh
-        self._reposition_toolbar()
-        self.da.queue_draw()
-        return True
-
-    def _on_release(self, widget, event):
-        if self.drag_was_new and (self.sel_w < MIN_NEW_SIZE or self.sel_h < MIN_NEW_SIZE):
-            self.sel_x, self.sel_y, self.sel_w, self.sel_h = self.drag_start_rect
-            self.da.queue_draw()
-        self.drag_mode = None
-        self._reposition_toolbar()
-        self._set_cursor_for_mode(self._hit_test(event.x, event.y))
-        return True
-
-    def _on_key(self, widget, event):
-        if event.keyval == Gdk.KEY_Escape:
+        def _emit(self):
+            sx = self.sel_x + self.mon_x
+            sy = self.sel_y + self.mon_y
+            self._result = _save_result(
+                self.mode, self.clipboard_mode, self.smart_slice, self.threshold,
+                sx, sy, self.sel_w, self.sel_h)
             Gtk.main_quit()
-        elif event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-            self._confirm()
+            return False
 
-    # ── confirm ───────────────────────────────────────────────────────────────
-    def _confirm(self, *_):
-        self.hide()
-        GLib.timeout_add(DELAY_MS, self._emit)
-
-    def _emit(self):
-        # Convert window-local coords to root/screen coords for external tools
-        sx = self.sel_x + self.mon_x
-        sy = self.sel_y + self.mon_y
-
-        _write(CLIP_MODE_FILE,   self.clipboard_mode)
-        _write(SMART_SLICE_FILE, '1' if self.smart_slice else '0')
-        _write(THRESHOLD_FILE,   f'{self.threshold:.3f}')
-        _write(LAST_MODE_FILE,   self.mode)
-        _write(os.path.join(CONFIG_DIR, _region_key(self.mode)),
-               f'{sx} {sy} {self.sel_w} {self.sel_h}')
-
-        w = self.sel_w + (self.sel_w % 2)
-        h = self.sel_h + (self.sel_h % 2)
-        smart = '1' if (self.smart_slice and self.mode != 'screenshot') else '0'
-        print(f'{self.mode} {self.clipboard_mode} {smart} {self.threshold:.3f} '
-              f'{sx} {sy} {w} {h}', flush=True)
-        Gtk.main_quit()
-        return False
-
-
-if __name__ == '__main__':
     win = RegionSelector()
     win.show_all()
-    # Fullscreen on the target monitor AFTER show so the WM actually honors it,
-    # otherwise GNOME constrains us to the work area and the bottom toolbar can
-    # overshoot off-screen.
     win.fullscreen_on_monitor(win.get_screen(), win._monitor_num)
     win.present()
     Gtk.main()
+    return win._result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# macOS / tkinter
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_mac():
+    import tkinter as tk
+    import subprocess, tempfile
+
+    class RegionSelector:
+        def __init__(self):
+            self.mode           = get_last_mode()
+            self.clipboard_mode = get_clipboard_mode()
+            self.smart_slice    = get_smart_slice()
+            self.threshold      = get_threshold()
+            self.drag_mode      = None
+            self.drag_origin    = (0, 0)
+            self.drag_start_rect = None
+            self.drag_was_new   = False
+            self._result        = None
+
+            self._root = tk.Tk()
+            self._root.overrideredirect(True)
+            self._root.wm_attributes('-topmost', True)
+
+            sw = self._root.winfo_screenwidth()
+            sh = self._root.winfo_screenheight()
+            self.scr_w, self.scr_h = sw, sh
+            self.mon_x, self.mon_y = 0, 0
+
+            self._root.geometry(f'{sw}x{sh}+0+0')
+
+            # Fake transparency using background screenshot
+            self._bg_img = None
+            bg_file = tempfile.mktemp(suffix='.png')
+            try:
+                r = subprocess.run(['screencapture', '-x', bg_file],
+                                   capture_output=True, timeout=5)
+                if r.returncode == 0 and os.path.exists(bg_file):
+                    img = tk.PhotoImage(file=bg_file)
+                    scale = round(img.width() / sw) if sw else 1
+                    if scale > 1:
+                        img = img.subsample(scale, scale)
+                    self._bg_img = img
+            except Exception:
+                pass
+            finally:
+                try: os.unlink(bg_file)
+                except: pass
+
+            if self._bg_img is None:
+                self._root.wm_attributes('-alpha', 0.35)
+
+            self._canvas = tk.Canvas(self._root, bg='black',
+                                     highlightthickness=0, cursor='crosshair')
+            self._canvas.pack(fill='both', expand=True)
+            if self._bg_img:
+                self._canvas.create_image(0, 0, anchor='nw',
+                                          image=self._bg_img, tags='bg')
+
+            last_region = get_last_region_for(self.mode)
+            if last_region:
+                rx, ry, rw, rh = last_region
+                self.sel_x, self.sel_y = rx, ry
+                self.sel_w, self.sel_h = rw, rh
+            else:
+                w, h = 720, 450
+                self.sel_x = max(0, (sw - w) // 2)
+                self.sel_y = max(0, (sh - h) // 2)
+                self.sel_w, self.sel_h = w, h
+
+            self._build_toolbar(tk)
+
+            self._canvas.bind('<ButtonPress-1>',   self._on_press)
+            self._canvas.bind('<B1-Motion>',       self._on_motion)
+            self._canvas.bind('<ButtonRelease-1>', self._on_release)
+            self._canvas.bind('<Motion>',          self._on_hover)
+            self._root.bind('<Escape>', lambda e: self._cancel())
+            self._root.bind('<Return>', lambda e: self._confirm())
+            self._root.focus_force()
+            self._redraw()
+
+        def _build_toolbar(self, tk):
+            BG, ACCENT = '#181825', '#89b4fa'
+            BTN_DIM = '#2a2a3a'
+
+            tbw, tbh = 700, 52
+            tx = max(0, (self.scr_w - tbw) // 2)
+            ty = self.scr_h - tbh - 24
+
+            self._tb = tk.Toplevel(self._root)
+            self._tb.overrideredirect(True)
+            self._tb.wm_attributes('-topmost', True)
+            self._tb.geometry(f'{tbw}x{tbh}+{tx}+{ty}')
+            self._tb.configure(bg=BG)
+            self._tb.bind('<Escape>', lambda e: self._cancel())
+
+            # Border
+            bc = tk.Canvas(self._tb, bg=BG, highlightthickness=0)
+            bc.place(x=0, y=0, relwidth=1, relheight=1)
+            bc.create_rectangle(0, 0, tbw-1, tbh-1, outline='#313244', width=1)
+
+            f = tk.Frame(self._tb, bg=BG)
+            f.place(x=8, y=6, width=tbw-16, height=tbh-12)
+
+            self._mode_btns = {}
+            for mode_id, icon, label, _ in MODES:
+                btn = tk.Button(
+                    f, text=f'{icon} {label}',
+                    bg=BTN_DIM, fg='#cdd6f4', activebackground=ACCENT,
+                    activeforeground='#1e1e2e', relief='flat',
+                    padx=8, pady=3, font=('Helvetica', 12), cursor='hand2',
+                    command=lambda m=mode_id: self._set_mode(m)
+                )
+                btn.pack(side='left', padx=2)
+                self._mode_btns[mode_id] = btn
+
+            tk.Frame(f, bg='#313244', width=1).pack(side='left', fill='y', padx=6, pady=2)
+
+            self._ctx = tk.Frame(f, bg=BG)
+            self._ctx.pack(side='left', padx=2)
+
+            tk.Frame(f, bg='#313244', width=1).pack(side='left', fill='y', padx=6, pady=2)
+
+            tk.Button(
+                f, text='✕ Cancel',
+                bg=BTN_DIM, fg='#a6adc8', activebackground='#313244',
+                activeforeground='#cdd6f4', relief='flat',
+                padx=8, pady=3, font=('Helvetica', 12), cursor='hand2',
+                command=self._cancel
+            ).pack(side='left', padx=2)
+
+            self._cap_btn = tk.Button(
+                f, text='📸 Capture',
+                bg=ACCENT, fg='#1e1e2e', activebackground='#a6c8fc',
+                activeforeground='#1e1e2e', relief='flat',
+                padx=12, pady=3, font=('Helvetica', 12, 'bold'),
+                cursor='hand2', command=self._confirm
+            )
+            self._cap_btn.pack(side='left', padx=2)
+            self._sync_mode()
+
+        def _sync_mode(self):
+            ACCENT, BTN_DIM = '#89b4fa', '#2a2a3a'
+            for mid, btn in self._mode_btns.items():
+                btn.configure(bg='#2a3a5a' if mid == self.mode else BTN_DIM,
+                              fg=ACCENT if mid == self.mode else '#cdd6f4')
+            for w in self._ctx.winfo_children():
+                w.destroy()
+            if self.mode == 'screenshot':
+                self._build_screenshot_ctx()
+            else:
+                self._build_recording_ctx()
+            self._cap_btn.configure(
+                text=next(bl for mid, _i, _l, bl in MODES if mid == self.mode))
+
+        def _build_screenshot_ctx(self):
+            BG = '#181825'
+            import tkinter as tk
+            tk.Label(self._ctx, text='Clipboard:', bg=BG, fg='#a6adc8',
+                     font=('Helvetica', 11)).pack(side='left', padx=(0, 4))
+            self._clip_btns = {}
+            for val, label in (('binary','Image'),('base64','Base64'),('url','URL')):
+                btn = tk.Button(
+                    self._ctx, text=label, bg='#2a2a3a', fg='#585b70',
+                    relief='flat', padx=6, pady=2, font=('Helvetica', 11),
+                    cursor='hand2', command=lambda v=val: self._set_clipboard(v)
+                )
+                btn.pack(side='left', padx=1)
+                self._clip_btns[val] = btn
+            self._refresh_clip_btns()
+
+        def _build_recording_ctx(self):
+            BG = '#181825'
+            import tkinter as tk
+            self._url_var = tk.BooleanVar(value=self.clipboard_mode == 'url')
+            tk.Checkbutton(
+                self._ctx, text='Copy URL', variable=self._url_var,
+                bg=BG, fg='#cdd6f4', selectcolor='#313244', activebackground=BG,
+                font=('Helvetica', 12), command=self._on_url_toggled
+            ).pack(side='left', padx=4)
+            self._slice_var = tk.BooleanVar(value=self.smart_slice)
+            tk.Checkbutton(
+                self._ctx, text='Smart Slice', variable=self._slice_var,
+                bg=BG, fg='#cdd6f4', selectcolor='#313244', activebackground=BG,
+                font=('Helvetica', 12), command=self._on_smart_slice_toggled
+            ).pack(side='left', padx=4)
+
+        def _refresh_clip_btns(self):
+            for val, btn in self._clip_btns.items():
+                btn.configure(bg='#2a3a5a' if val == self.clipboard_mode else '#2a2a3a',
+                              fg='#89b4fa' if val == self.clipboard_mode else '#585b70')
+
+        def _set_clipboard(self, mode):
+            self.clipboard_mode = mode
+            self._refresh_clip_btns()
+
+        def _on_url_toggled(self):
+            self.clipboard_mode = 'url' if self._url_var.get() else 'binary'
+
+        def _on_smart_slice_toggled(self):
+            self.smart_slice = self._slice_var.get()
+
+        def _set_mode(self, mode):
+            if mode == self.mode: return
+            last = get_last_region_for(mode)
+            self.mode = mode
+            if last:
+                rx, ry, rw, rh = last
+                self.sel_x, self.sel_y = rx, ry
+                self.sel_w, self.sel_h = rw, rh
+                self._redraw()
+            self._sync_mode()
+
+        def _redraw(self):
+            c = self._canvas
+            c.delete('overlay')
+            sw, sh = self.scr_w, self.scr_h
+            sx, sy, sew, seh = self.sel_x, self.sel_y, self.sel_w, self.sel_h
+            kw = dict(fill='black', stipple='gray50', outline='', tags='overlay')
+            if sy > 0:         c.create_rectangle(0, 0, sw, sy, **kw)
+            if sy+seh < sh:    c.create_rectangle(0, sy+seh, sw, sh, **kw)
+            if sx > 0:         c.create_rectangle(0, sy, sx, sy+seh, **kw)
+            if sx+sew < sw:    c.create_rectangle(sx+sew, sy, sw, sy+seh, **kw)
+            if sew < 2 or seh < 2: return
+            c.create_rectangle(sx+1, sy+1, sx+sew-1, sy+seh-1,
+                               outline='#89b4fa', width=2, dash=(12,6), tags='overlay')
+            sq = 10
+            for hx, hy in [(sx,sy),(sx+sew,sy),(sx,sy+seh),(sx+sew,sy+seh)]:
+                c.create_rectangle(hx-sq//2, hy-sq//2, hx+sq//2, hy+sq//2,
+                                   fill='#89b4fa', outline='', tags='overlay')
+            text = f'{sew} × {seh}'
+            lx = sx; ly = sy-28 if sy > 28 else sy+8
+            c.create_rectangle(lx, ly, lx+len(text)*8+14, ly+22,
+                               fill='#1e1e2e', outline='', tags='overlay')
+            c.create_text(lx+7, ly+11, text=text, fill='#cdd6f4',
+                         anchor='w', font=('Helvetica', 13), tags='overlay')
+
+        def _hit_test(self, x, y):
+            sx, sy, sw, sh = self.sel_x, self.sel_y, self.sel_w, self.sel_h
+            if not (sx-EDGE <= x <= sx+sw+EDGE and sy-EDGE <= y <= sy+sh+EDGE):
+                return 'new'
+            nl=x<=sx+EDGE; nr=x>=sx+sw-EDGE; nt=y<=sy+EDGE; nb=y>=sy+sh-EDGE
+            if nt and nl: return 'nw'
+            if nt and nr: return 'ne'
+            if nb and nl: return 'sw'
+            if nb and nr: return 'se'
+            if nl: return 'w'
+            if nr: return 'e'
+            if nt: return 'n'
+            if nb: return 's'
+            return 'move'
+
+        _CURS = {
+            'move':'fleur','new':'crosshair',
+            'nw':'top_left_corner','ne':'top_right_corner',
+            'sw':'bottom_left_corner','se':'bottom_right_corner',
+            'w':'left_side','e':'right_side','n':'top_side','s':'bottom_side',
+        }
+
+        def _set_cursor(self, mode):
+            try: self._canvas.configure(cursor=self._CURS.get(mode, 'crosshair'))
+            except: pass
+
+        def _on_press(self, event):
+            x, y = event.x, event.y
+            mode = self._hit_test(x, y)
+            self.drag_origin = (x, y)
+            self.drag_start_rect = (self.sel_x, self.sel_y, self.sel_w, self.sel_h)
+            self.drag_was_new = (mode == 'new')
+            if mode == 'new':
+                self.sel_x, self.sel_y = int(x), int(y)
+                self.sel_w, self.sel_h = 0, 0
+                self.drag_start_rect = (int(x), int(y), 0, 0)
+                self.drag_mode = 'se'
+            else:
+                self.drag_mode = mode
+            self._set_cursor(self.drag_mode)
+            self._redraw()
+
+        def _on_motion(self, event):
+            if self.drag_mode is None: return
+            dx = event.x - self.drag_origin[0]
+            dy = event.y - self.drag_origin[1]
+            ox, oy, ow, oh = self.drag_start_rect
+            if self.drag_mode == 'move':
+                nx, ny, nw, nh = int(ox+dx), int(oy+dy), ow, oh
+            else:
+                nx, ny, nw, nh = ox, oy, ow, oh
+                if self.drag_mode in ('w','nw','sw'): nx=int(ox+dx); nw=int(ow-dx)
+                elif self.drag_mode in ('e','ne','se'): nw=int(ow+dx)
+                if self.drag_mode in ('n','nw','ne'): ny=int(oy+dy); nh=int(oh-dy)
+                elif self.drag_mode in ('s','sw','se'): nh=int(oh+dy)
+                if nw<0: nx+=nw; nw=-nw
+                if nh<0: ny+=nh; nh=-nh
+            self.sel_x, self.sel_y, self.sel_w, self.sel_h = nx, ny, nw, nh
+            self._redraw()
+
+        def _on_release(self, event):
+            if self.drag_was_new and (self.sel_w<MIN_NEW_SIZE or self.sel_h<MIN_NEW_SIZE):
+                self.sel_x, self.sel_y, self.sel_w, self.sel_h = self.drag_start_rect
+                self._redraw()
+            self.drag_mode = None
+            self._set_cursor(self._hit_test(event.x, event.y))
+
+        def _on_hover(self, event):
+            if self.drag_mode is None:
+                self._set_cursor(self._hit_test(event.x, event.y))
+
+        def _cancel(self):
+            self._result = None
+            self._root.quit()
+
+        def _confirm(self, *_):
+            self._root.withdraw()
+            self._tb.withdraw()
+            self._root.after(DELAY_MS, self._emit)
+
+        def _emit(self):
+            self._result = _save_result(
+                self.mode, self.clipboard_mode, self.smart_slice, self.threshold,
+                self.sel_x + self.mon_x, self.sel_y + self.mon_y,
+                self.sel_w, self.sel_h)
+            self._root.quit()
+
+    sel = RegionSelector()
+    sel._root.mainloop()
+    return sel._result
+
+
+# ── entry point ───────────────────────────────────────────────────────────────
+
+if __name__ == '__main__':
+    result = run_mac() if platform.system() == 'Darwin' else run_gtk()
+    if result:
+        print(result, flush=True)

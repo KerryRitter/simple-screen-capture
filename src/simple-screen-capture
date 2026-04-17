@@ -1,51 +1,140 @@
 #!/usr/bin/env bash
-# simple-screen-capture — screenshot · GIF · screencast with integrated GTK capture panel
+# simple-screen-capture — screenshot · GIF · screencast with integrated capture panel
 
 set -uo pipefail
 
-export DISPLAY="${DISPLAY:-:0}"
-export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
+PLATFORM=$(uname -s)  # Darwin or Linux
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+
+if [[ "$PLATFORM" == "Linux" ]]; then
+  export DISPLAY="${DISPLAY:-:0}"
+  export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
+fi
 
 CONFIG_DIR="$HOME/.config/capture"
 SCREENSHOTS_DIR="$HOME/Pictures/Screenshots"
-SCREENCASTS_DIR="$HOME/Videos/Screencasts"
+if [[ "$PLATFORM" == "Darwin" ]]; then
+  SCREENCASTS_DIR="$HOME/Movies/Screencasts"
+else
+  SCREENCASTS_DIR="$HOME/Videos/Screencasts"
+fi
 SLICES_DIR="$SCREENSHOTS_DIR/slices"
 
 mkdir -p "$CONFIG_DIR" "$SCREENSHOTS_DIR" "$SCREENCASTS_DIR"
 
 # ── dependency check ──────────────────────────────────────────────────────────
-MISSING=()
-for cmd in maim ffmpeg xclip optipng; do
-  command -v "$cmd" &>/dev/null || MISSING+=("$cmd")
-done
-if (( ${#MISSING[@]} )); then
-  MSG="capture: missing ${MISSING[*]} — install: sudo apt install ${MISSING[*]}"
-  command -v notify-send &>/dev/null && notify-send "capture" "$MSG" -t 6000
-  echo "$MSG" >&2
-  exit 1
+if [[ "$PLATFORM" == "Darwin" ]]; then
+  MISSING=()
+  for cmd in ffmpeg; do
+    command -v "$cmd" &>/dev/null || MISSING+=("$cmd")
+  done
+  if (( ${#MISSING[@]} )); then
+    MSG="capture: missing ${MISSING[*]} — install: brew install ${MISSING[*]}"
+    osascript -e "display notification \"$MSG\" with title \"capture\"" 2>/dev/null || true
+    echo "$MSG" >&2
+    exit 1
+  fi
+else
+  MISSING=()
+  for cmd in maim ffmpeg xclip optipng; do
+    command -v "$cmd" &>/dev/null || MISSING+=("$cmd")
+  done
+  if (( ${#MISSING[@]} )); then
+    MSG="capture: missing ${MISSING[*]} — install: sudo apt install ${MISSING[*]}"
+    command -v notify-send &>/dev/null && notify-send "capture" "$MSG" -t 6000
+    echo "$MSG" >&2
+    exit 1
+  fi
 fi
 
 # ── notify helper ─────────────────────────────────────────────────────────────
-say() { command -v notify-send &>/dev/null && notify-send "$1" "$2" -t "${3:-3000}" || true; }
+say() {
+  if [[ "$PLATFORM" == "Darwin" ]]; then
+    osascript -e "display notification \"$2\" with title \"$1\"" 2>/dev/null || true
+  else
+    command -v notify-send &>/dev/null && notify-send "$1" "$2" -t "${3:-3000}" || true
+  fi
+}
+
+# ── clipboard helper ──────────────────────────────────────────────────────────
+clip_text() {
+  if [[ "$PLATFORM" == "Darwin" ]]; then
+    printf '%s' "$1" | pbcopy
+  else
+    printf '%s' "$1" | xclip -selection clipboard
+  fi
+}
+
+clip_image() {
+  local file="$1"
+  if [[ "$PLATFORM" == "Darwin" ]]; then
+    osascript -e "set the clipboard to (read (POSIX file \"$file\") as «class PNGf»)" 2>/dev/null
+  else
+    xclip -selection clipboard -t image/png < "$file"
+  fi
+}
+
+clip_base64() {
+  local file="$1"
+  if [[ "$PLATFORM" == "Darwin" ]]; then
+    base64 "$file" | pbcopy
+  else
+    base64 -w 0 "$file" | xclip -selection clipboard
+  fi
+}
+
+# ── macOS display helpers ─────────────────────────────────────────────────────
+_MAC_SCALE=""
+mac_display_scale() {
+  if [[ -z "$_MAC_SCALE" ]]; then
+    local tmp; tmp=$(mktemp /tmp/scale-XXXXXX.png)
+    screencapture -x -R "0,0,100,100" "$tmp" 2>/dev/null
+    _MAC_SCALE=$(python3 - <<'EOF'
+import struct, sys, os
+path = sys.argv[1] if len(sys.argv) > 1 else ""
+try:
+    with open(path, 'rb') as f:
+        f.read(16)
+        w = struct.unpack('>I', f.read(4))[0]
+    print(w // 100)
+except Exception:
+    print(1)
+EOF
+"$tmp" 2>/dev/null || echo 1)
+    rm -f "$tmp"
+    _MAC_SCALE="${_MAC_SCALE:-1}"
+  fi
+  echo "$_MAC_SCALE"
+}
+
+_MAC_SCREEN_IDX=""
+mac_screen_index() {
+  if [[ -z "$_MAC_SCREEN_IDX" ]]; then
+    _MAC_SCREEN_IDX=$(ffmpeg -f avfoundation -list_devices true -i "" 2>&1 | \
+      awk '/\[AVF/ && /[Cc]apture [Ss]creen/{match($0,/\[([0-9]+)\]/,a); if(a[1]!="") {print a[1]; exit}}')
+    _MAC_SCREEN_IDX="${_MAC_SCREEN_IDX:-1}"
+  fi
+  echo "$_MAC_SCREEN_IDX"
+}
 
 # ── upload helper ─────────────────────────────────────────────────────────────
-upload_and_xclip() {
+upload_and_clip() {
   local file="$1" label="$2"
   local url err
   say "$label" "Uploading…" 20000
-  if ! url=$(/usr/bin/python3 /usr/bin/capture-upload "$file" 2>/tmp/capture-upload.err); then
+  if ! url=$(python3 "${SCRIPT_DIR}/capture-upload" "$file" 2>/tmp/capture-upload.err); then
     err=$(cat /tmp/capture-upload.err 2>/dev/null)
     say "$label" "Upload failed — ${err:-unknown error}" 8000
     return 1
   fi
-  printf '%s' "$url" | xclip -selection clipboard
+  clip_text "$url"
   say "$label" "URL copied — $url" 6000
 }
 
 # ── stop panel ────────────────────────────────────────────────────────────────
 wait_for_stop() {
   sleep 0.4
-  /usr/bin/python3 /usr/bin/capture-stop "$1"
+  python3 "${SCRIPT_DIR}/capture-stop" "$1"
 }
 
 # ── smart slice ───────────────────────────────────────────────────────────────
@@ -58,9 +147,6 @@ do_smart_slice() {
 
   say "Smart Slice" "Analysing recording…" 20000
 
-  # 0.07 threshold suits UI/terminal recordings (movie scene cuts need ~0.25+).
-  # The gte(t-prev_selected_t,0.5) guard prevents frame bursts during rapid
-  # output — at most one slice every 0.5 s even if every frame is "different".
   ffmpeg -i "$video" \
     -vf "select='eq(n\,0)+gt(scene\,${threshold})*gte(t-prev_selected_t\,0.5)',setpts=N/TB" \
     -vsync vfr \
@@ -88,11 +174,15 @@ do_screenshot() {
   out="$SCREENSHOTS_DIR/${ts}.png"
   trap 'rm -f "$tmp"' RETURN
 
-  maim -g "${W}x${H}+${X}+${Y}" "$tmp" 2>/dev/null || return
+  if [[ "$PLATFORM" == "Darwin" ]]; then
+    screencapture -x -R "${X},${Y},${W},${H}" "$tmp" 2>/dev/null || return
+  else
+    maim -g "${W}x${H}+${X}+${Y}" "$tmp" 2>/dev/null || return
+  fi
 
   local orig comp pct
   orig=$(wc -c < "$tmp")
-  optipng -quiet -o2 "$tmp"
+  command -v optipng &>/dev/null && optipng -quiet -o2 "$tmp"
   comp=$(wc -c < "$tmp")
   pct=$(( (orig - comp) * 100 / orig ))
 
@@ -100,14 +190,14 @@ do_screenshot() {
 
   case "$clipboard_mode" in
     url)
-      upload_and_xclip "$out" "Screenshot"
+      upload_and_clip "$out" "Screenshot"
       ;;
     base64)
-      base64 -w 0 "$tmp" | xclip -selection clipboard
+      clip_base64 "$tmp"
       say "Screenshot" "Base64 copied — ${comp}B (−${pct}%)"
       ;;
     *)
-      xclip -selection clipboard -t image/png < "$tmp"
+      clip_image "$tmp"
       say "Screenshot" "Image copied — ${comp}B (−${pct}%)"
       ;;
   esac
@@ -124,8 +214,19 @@ do_gif() {
 
   [[ $W -lt 2 || $H -lt 2 ]] && return
 
-  ffmpeg -f x11grab -r 15 -s "${W}x${H}" -i "${DISPLAY}+${X},${Y}" \
-    -vcodec libx264 -preset ultrafast -crf 0 "$tmp" -y -loglevel quiet &
+  if [[ "$PLATFORM" == "Darwin" ]]; then
+    local scale screen_idx px py pw ph
+    scale=$(mac_display_scale)
+    screen_idx=$(mac_screen_index)
+    px=$(( X * scale )); py=$(( Y * scale ))
+    pw=$(( W * scale )); ph=$(( H * scale ))
+    ffmpeg -f avfoundation -r 15 -i "${screen_idx}" \
+      -filter:v "crop=${pw}:${ph}:${px}:${py}" \
+      -vcodec libx264 -preset ultrafast -crf 0 "$tmp" -y -loglevel quiet &
+  else
+    ffmpeg -f x11grab -r 15 -s "${W}x${H}" -i "${DISPLAY}+${X},${Y}" \
+      -vcodec libx264 -preset ultrafast -crf 0 "$tmp" -y -loglevel quiet &
+  fi
   local fpid=$!
 
   wait_for_stop "Recording GIF"
@@ -147,7 +248,7 @@ do_gif() {
 
   local size; size=$(du -h "$out" | cut -f1)
   if [[ "$clipboard_mode" == "url" ]]; then
-    upload_and_xclip "$out" "GIF ($size)"
+    upload_and_clip "$out" "GIF ($size)"
   else
     say "GIF saved" "${size} — $(basename "$out")" 5000
   fi
@@ -165,16 +266,33 @@ do_record() {
 
   [[ $W -lt 2 || $H -lt 2 ]] && return
 
-  local -a args=(-f x11grab -r 30 -s "${W}x${H}" -i "${DISPLAY}+${X},${Y}")
+  local -a args
 
-  if [[ "$audio" == "yes" ]]; then
-    local src
-    src=$(pactl info 2>/dev/null | awk '/Default Source/{print $3}') || src="default"
-    args+=(-f pulse -i "$src")
+  if [[ "$PLATFORM" == "Darwin" ]]; then
+    local scale screen_idx px py pw ph
+    scale=$(mac_display_scale)
+    screen_idx=$(mac_screen_index)
+    px=$(( X * scale )); py=$(( Y * scale ))
+    pw=$(( W * scale )); ph=$(( H * scale ))
+
+    local input="${screen_idx}"
+    [[ "$audio" == "yes" ]] && input="${screen_idx}:0"
+
+    args=(-f avfoundation -r 30 -i "${input}"
+          -filter:v "crop=${pw}:${ph}:${px}:${py},scale=${W}:-1:flags=lanczos"
+          -vcodec libx264 -preset ultrafast -crf 18)
+    [[ "$audio" == "yes" ]] && args+=(-acodec aac -b:a 128k)
+  else
+    args=(-f x11grab -r 30 -s "${W}x${H}" -i "${DISPLAY}+${X},${Y}")
+    if [[ "$audio" == "yes" ]]; then
+      local src
+      src=$(pactl info 2>/dev/null | awk '/Default Source/{print $3}') || src="default"
+      args+=(-f pulse -i "$src")
+    fi
+    args+=(-vcodec libx264 -preset ultrafast -crf 18)
+    [[ "$audio" == "yes" ]] && args+=(-acodec aac -b:a 128k)
   fi
 
-  args+=(-vcodec libx264 -preset ultrafast -crf 18)
-  [[ "$audio" == "yes" ]] && args+=(-acodec aac -b:a 128k)
   args+=("$out" -y -loglevel quiet)
 
   ffmpeg "${args[@]}" &
@@ -185,7 +303,7 @@ do_record() {
 
   local size; size=$(du -h "$out" | cut -f1)
   if [[ "$clipboard_mode" == "url" ]]; then
-    upload_and_xclip "$out" "Screencast ($size)"
+    upload_and_clip "$out" "Screencast ($size)"
   else
     say "Screencast saved" "${size} — $(basename "$out")" 5000
   fi
@@ -292,14 +410,32 @@ EOF
 }
 
 do_setup_shortcut() {
+  if [[ "$PLATFORM" == "Darwin" ]]; then
+    echo ""
+    echo "To register a global keyboard shortcut on macOS, choose one option:"
+    echo ""
+    echo "Option 1 — Hammerspoon (recommended):"
+    echo "  brew install --cask hammerspoon"
+    echo "  Add to ~/.hammerspoon/init.lua:"
+    echo "    hs.hotkey.bind({'ctrl','shift','alt'}, '4', function()"
+    echo "      hs.execute('$(readlink -f "$0" 2>/dev/null || echo /usr/local/bin/simple-screen-capture)')"
+    echo "    end)"
+    echo ""
+    echo "Option 2 — Automator Service:"
+    echo "  Open Automator → New Quick Action → Run Shell Script"
+    echo "  Enter: $(readlink -f "$0" 2>/dev/null || echo /usr/local/bin/simple-screen-capture)"
+    echo "  Save as 'Screen Capture', then assign shortcut in"
+    echo "  System Settings → Keyboard → Keyboard Shortcuts → Services"
+    echo ""
+    return 0
+  fi
+
   echo "Setting up simple-screen-capture shortcut (Ctrl+Shift+Alt+4)..."
 
   local binding="<Primary><Shift><Alt>4"
   local schema="org.gnome.settings-daemon.plugins.media-keys"
   local base_path="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings"
 
-  # Find any existing slot that already owns our binding and update it in-place.
-  # This avoids fighting list-management resets by GNOME/PopOS.
   local existing target_slot=""
   existing=$(gsettings get "$schema" custom-keybindings)
   local cleaned
@@ -410,7 +546,6 @@ do_import_config() {
   elif [[ -f "$src" ]]; then
     ciphertext=$(cat "$src")
   elif [[ "$src" =~ ^U2FsdGVkX1 ]]; then
-    # Literal openssl-salted base64 blob (always starts with "Salted__" → U2FsdGVkX1 in b64)
     ciphertext="$src"
   else
     echo "capture: not a URL, file, or ciphertext: $src" >&2; exit 1
@@ -456,7 +591,7 @@ case "${1:-}" in
   --import-config)    do_import_config "${2:-}";    exit 0 ;;
 esac
 
-result=$(/usr/bin/python3 /usr/bin/capture-region 2>/dev/null) || true
+result=$(python3 "${SCRIPT_DIR}/capture-region" 2>/dev/null) || true
 [[ -z "$result" ]] && exit 0
 
 read -r action clipboard smart_slice threshold X Y W H <<< "$result"
